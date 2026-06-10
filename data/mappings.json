@@ -1,7 +1,7 @@
 {
-  "version": "1.0",
+  "version": "1.1",
   "last_updated": "2024-12-15",
-  "total_packages": 6,
+  "total_packages": 18,
   "packages": {
     "vlc": {
       "name": "VLC Media Player",
@@ -21,8 +21,47 @@
         }
       ]
     },
+    "firefox": {
+      "name": "Mozilla Firefox",
+      "homepage": "https://www.mozilla.org/firefox/",
+      "category": "browser",
+      "sources": [
+        {
+          "type": "mozilla_releases",
+          "url": "https://www.mozilla.org/en-US/firefox/releases/",
+          "parser": "mozilla",
+          "priority": 1
+        }
+      ]
+    },
+    "thunderbird": {
+      "name": "Mozilla Thunderbird",
+      "homepage": "https://www.thunderbird.net/",
+      "category": "communication",
+      "sources": [
+        {
+          "type": "mozilla_releases",
+          "url": "https://www.thunderbird.net/en-US/thunderbird/releases/",
+          "parser": "mozilla",
+          "priority": 1
+        }
+      ]
+    },
     "libreoffice-fresh": {
       "name": "LibreOffice Fresh",
+      "homepage": "https://www.libreoffice.org/",
+      "category": "office",
+      "sources": [
+        {
+          "type": "html_page",
+          "url": "https://wiki.documentfoundation.org/ReleaseNotes/",
+          "parser": "mediawiki",
+          "priority": 1
+        }
+      ]
+    },
+    "libreoffice-still": {
+      "name": "LibreOffice Still",
       "homepage": "https://www.libreoffice.org/",
       "category": "office",
       "sources": [
@@ -44,30 +83,57 @@
           "url": "https://www.gimp.org/release-notes/",
           "parser": "gimp",
           "priority": 1
-        },
-        {
-          "type": "gitlab_releases",
-          "host": "gitlab.gnome.org",
-          "repo": "GNOME/gimp",
-          "priority": 2
         }
       ]
     },
-    "firefox": {
-      "name": "Mozilla Firefox",
-      "homepage": "https://www.mozilla.org/firefox/",
-      "category": "browser",
+    "krita": {
+      "name": "Krita",
+      "homepage": "https://krita.org/",
+      "category": "graphics",
       "sources": [
         {
           "type": "html_page",
-          "url": "https://www.mozilla.org/en-US/firefox/releases/",
-          "parser": "mozilla",
+          "url": "https://krita.org/en/release-notes/",
+          "parser": "html_page",
           "priority": 1
-        },
+        }
+      ]
+    },
+    "inkscape": {
+      "name": "Inkscape",
+      "homepage": "https://inkscape.org/",
+      "category": "graphics",
+      "sources": [
         {
-          "type": "releasebot",
-          "project": "mozilla/firefox",
-          "priority": 2
+          "type": "html_page",
+          "url": "https://inkscape.org/release/",
+          "parser": "html_page",
+          "priority": 1
+        }
+      ]
+    },
+    "blender": {
+      "name": "Blender",
+      "homepage": "https://www.blender.org/",
+      "category": "graphics",
+      "sources": [
+        {
+          "type": "html_page",
+          "url": "https://www.blender.org/download/releases/",
+          "parser": "html_page",
+          "priority": 1
+        }
+      ]
+    },
+    "darktable": {
+      "name": "darktable",
+      "homepage": "https://www.darktable.org/",
+      "category": "graphics",
+      "sources": [
+        {
+          "type": "github_releases",
+          "repo": "darktable-org/darktable",
+          "priority": 1
         }
       ]
     },
@@ -83,7 +149,39 @@
         }
       ]
     },
-
+    "xnviewmp": {
+      "name": "XnView MP",
+      "homepage": "https://www.xnview.com/",
+      "category": "graphics",
+      "arch_packages": ["xnviewmp"],
+      "aur_packages": ["xnviewmp", "xnview-mp"],
+      "sources": [
+        {
+          "type": "custom_parser",
+          "url": "https://www.xnview.com/mantisbt/changelog_page.php",
+          "parser": "mantisbt_changelog",
+          "priority": 1
+        }
+      ]
+    },
+    "eidklient": {
+      "name": "eID Klient",
+      "homepage": "https://eidas.minv.sk/",
+      "category": "security",
+      "aur_package": "eidklient",
+      "sources": [
+        {
+          "type": "text_file",
+          "url": "https://eidas.minv.sk/downloadservice/eidklient/linux/eID_klient_release_notes.txt",
+          "parser": "plain_text",
+          "priority": 1,
+          "config": {
+            "version_pattern": "Version\\s+(\\d+\\.\\d+\\.\\d+)",
+            "separator": "---"
+          }
+        }
+      ]
+    },
     "chromium": {
       "name": "Chromium",
       "homepage": "https://www.chromium.org/",
@@ -92,19 +190,6 @@
         {
           "type": "releasebot",
           "project": "chromium/chromium",
-          "priority": 1
-        }
-      ]
-    },
-    "thunderbird": {
-      "name": "Thunderbird",
-      "homepage": "https://www.thunderbird.net/",
-      "category": "communication",
-      "sources": [
-        {
-          "type": "html_page",
-          "url": "https://www.thunderbird.net/en-US/thunderbird/releases/",
-          "parser": "mozilla",
           "priority": 1
         }
       ]
@@ -130,57 +215,6 @@
           "type": "gitlab_releases",
           "host": "invent.kde.org",
           "repo": "multimedia/kdenlive",
-          "priority": 1
-        }
-      ]
-    },
-    "blender": {
-      "name": "Blender",
-      "homepage": "https://www.blender.org/",
-      "category": "graphics",
-      "sources": [
-        {
-          "type": "html_page",
-          "url": "https://www.blender.org/download/releases/",
-          "parser": "html_page",
-          "priority": 1
-        },
-        {
-          "type": "gitlab_releases",
-          "host": "git.blender.org",
-          "repo": "blender/blender",
-          "priority": 2
-        }
-      ]
-    },
-    "inkscape": {
-      "name": "Inkscape",
-      "homepage": "https://inkscape.org/",
-      "category": "graphics",
-      "sources": [
-        {
-          "type": "html_page",
-          "url": "https://inkscape.org/release/",
-          "parser": "html_page",
-          "priority": 1
-        },
-        {
-          "type": "gitlab_releases",
-          "host": "gitlab.com",
-          "repo": "inkscape/inkscape",
-          "priority": 2
-        }
-      ]
-    },
-    "krita": {
-      "name": "Krita",
-      "homepage": "https://krita.org/",
-      "category": "graphics",
-      "sources": [
-        {
-          "type": "html_page",
-          "url": "https://krita.org/en/release-notes/",
-          "parser": "html_page",
           "priority": 1
         }
       ]
@@ -220,19 +254,6 @@
           "priority": 1
         }
       ]
-    },
-    "xnviewmp": {
-      "name": "XnView MP",
-      "homepage": "https://www.xnview.com/",
-      "category": "graphics",
-      "sources": [
-        {
-          "type": "custom_parser",
-          "url": "https://www.xnview.com/mantisbt/changelog_page.php",
-          "parser": "mantisbt_changelog",
-          "priority": 1
-        }
-      ]
     }
   },
   "parsers": {
@@ -248,6 +269,15 @@
       "description": "HTML release notes page",
       "requires": ["url"],
       "optional": ["parser"]
+    },
+    "mozilla_releases": {
+      "description": "Mozilla-style release notes (Firefox, Thunderbird)",
+      "requires": ["url"]
+    },
+    "text_file": {
+      "description": "Plain text changelog file",
+      "requires": ["url"],
+      "optional": ["config"]
     },
     "releasebot": {
       "description": "ReleaseBot.io tracking",
