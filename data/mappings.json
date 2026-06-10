@@ -83,6 +83,144 @@
         }
       ]
     },
+
+    "chromium": {
+      "name": "Chromium",
+      "homepage": "https://www.chromium.org/",
+      "category": "browser",
+      "sources": [
+        {
+          "type": "releasebot",
+          "project": "chromium/chromium",
+          "priority": 1
+        }
+      ]
+    },
+    "thunderbird": {
+      "name": "Thunderbird",
+      "homepage": "https://www.thunderbird.net/",
+      "category": "communication",
+      "sources": [
+        {
+          "type": "html_page",
+          "url": "https://www.thunderbird.net/en-US/thunderbird/releases/",
+          "parser": "mozilla",
+          "priority": 1
+        }
+      ]
+    },
+    "obs-studio": {
+      "name": "OBS Studio",
+      "homepage": "https://obsproject.com/",
+      "category": "multimedia",
+      "sources": [
+        {
+          "type": "github_releases",
+          "repo": "obsproject/obs-studio",
+          "priority": 1
+        }
+      ]
+    },
+    "kdenlive": {
+      "name": "Kdenlive",
+      "homepage": "https://kdenlive.org/",
+      "category": "multimedia",
+      "sources": [
+        {
+          "type": "gitlab_releases",
+          "host": "invent.kde.org",
+          "repo": "multimedia/kdenlive",
+          "priority": 1
+        }
+      ]
+    },
+    "blender": {
+      "name": "Blender",
+      "homepage": "https://www.blender.org/",
+      "category": "graphics",
+      "sources": [
+        {
+          "type": "html_page",
+          "url": "https://www.blender.org/download/releases/",
+          "parser": "html_page",
+          "priority": 1
+        },
+        {
+          "type": "gitlab_releases",
+          "host": "git.blender.org",
+          "repo": "blender/blender",
+          "priority": 2
+        }
+      ]
+    },
+    "inkscape": {
+      "name": "Inkscape",
+      "homepage": "https://inkscape.org/",
+      "category": "graphics",
+      "sources": [
+        {
+          "type": "html_page",
+          "url": "https://inkscape.org/release/",
+          "parser": "html_page",
+          "priority": 1
+        },
+        {
+          "type": "gitlab_releases",
+          "host": "gitlab.com",
+          "repo": "inkscape/inkscape",
+          "priority": 2
+        }
+      ]
+    },
+    "krita": {
+      "name": "Krita",
+      "homepage": "https://krita.org/",
+      "category": "graphics",
+      "sources": [
+        {
+          "type": "html_page",
+          "url": "https://krita.org/en/release-notes/",
+          "parser": "html_page",
+          "priority": 1
+        }
+      ]
+    },
+    "audacity": {
+      "name": "Audacity",
+      "homepage": "https://www.audacityteam.org/",
+      "category": "multimedia",
+      "sources": [
+        {
+          "type": "github_releases",
+          "repo": "audacity/audacity",
+          "priority": 1
+        }
+      ]
+    },
+    "handbrake": {
+      "name": "HandBrake",
+      "homepage": "https://handbrake.fr/",
+      "category": "multimedia",
+      "sources": [
+        {
+          "type": "github_releases",
+          "repo": "HandBrake/HandBrake",
+          "priority": 1
+        }
+      ]
+    },
+    "keepassxc": {
+      "name": "KeePassXC",
+      "homepage": "https://keepassxc.org/",
+      "category": "security",
+      "sources": [
+        {
+          "type": "github_releases",
+          "repo": "keepassxreboot/keepassxc",
+          "priority": 1
+        }
+      ]
+    },
     "xnviewmp": {
       "name": "XnView MP",
       "homepage": "https://www.xnview.com/",
