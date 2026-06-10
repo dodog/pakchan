@@ -1,11 +1,105 @@
 {
   "version": "1.0",
-  "last_updated": "2024-01-15",
-  "total_packages": 0,
-  "packages": {},
+  "last_updated": "2024-12-15",
+  "total_packages": 6,
+  "packages": {
+    "vlc": {
+      "name": "VLC Media Player",
+      "homepage": "https://www.videolan.org/",
+      "category": "multimedia",
+      "sources": [
+        {
+          "type": "html_page",
+          "url": "https://www.videolan.org/vlc/releases/",
+          "parser": "videolan",
+          "priority": 1
+        },
+        {
+          "type": "github_releases",
+          "repo": "videolan/vlc",
+          "priority": 2
+        }
+      ]
+    },
+    "libreoffice-fresh": {
+      "name": "LibreOffice Fresh",
+      "homepage": "https://www.libreoffice.org/",
+      "category": "office",
+      "sources": [
+        {
+          "type": "html_page",
+          "url": "https://wiki.documentfoundation.org/ReleaseNotes/",
+          "parser": "mediawiki",
+          "priority": 1
+        }
+      ]
+    },
+    "gimp": {
+      "name": "GIMP",
+      "homepage": "https://www.gimp.org/",
+      "category": "graphics",
+      "sources": [
+        {
+          "type": "html_page",
+          "url": "https://www.gimp.org/release-notes/",
+          "parser": "gimp",
+          "priority": 1
+        },
+        {
+          "type": "gitlab_releases",
+          "host": "gitlab.gnome.org",
+          "repo": "GNOME/gimp",
+          "priority": 2
+        }
+      ]
+    },
+    "firefox": {
+      "name": "Mozilla Firefox",
+      "homepage": "https://www.mozilla.org/firefox/",
+      "category": "browser",
+      "sources": [
+        {
+          "type": "html_page",
+          "url": "https://www.mozilla.org/en-US/firefox/releases/",
+          "parser": "mozilla",
+          "priority": 1
+        },
+        {
+          "type": "releasebot",
+          "project": "mozilla/firefox",
+          "priority": 2
+        }
+      ]
+    },
+    "element-desktop": {
+      "name": "Element Desktop",
+      "homepage": "https://element.io/",
+      "category": "communication",
+      "sources": [
+        {
+          "type": "github_releases",
+          "repo": "element-hq/element-desktop",
+          "priority": 1
+        }
+      ]
+    },
+    "xnviewmp": {
+      "name": "XnView MP",
+      "homepage": "https://www.xnview.com/",
+      "category": "graphics",
+      "sources": [
+        {
+          "type": "custom_parser",
+          "url": "https://www.xnview.com/mantisbt/changelog_page.php",
+          "parser": "mantisbt_changelog",
+          "priority": 1
+        }
+      ]
+    }
+  },
   "parsers": {
     "github_releases": {
-      "description": "Standard GitHub Releases API",
+      "description": "GitHub Releases API",
       "requires": ["repo"]
     },
     "gitlab_releases": {
@@ -13,18 +107,17 @@
       "requires": ["host", "repo"]
     },
     "html_page": {
-      "description": "HTML page with release notes",
+      "description": "HTML release notes page",
       "requires": ["url"],
-      "optional": ["version_selector", "changes_selector"]
+      "optional": ["parser"]
     },
-    "mozilla_releases": {
-      "description": "Mozilla-style release notes page",
-      "requires": ["url"]
+    "releasebot": {
+      "description": "ReleaseBot.io tracking",
+      "requires": ["project"]
     },
-    "mediawiki": {
-      "description": "MediaWiki changelog page",
-      "requires": ["url"]
+    "custom_parser": {
+      "description": "Custom parser for specific sites",
+      "requires": ["url", "parser"]
     }
-  },
-  "contributors": []
+  }
 }
