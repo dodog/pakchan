@@ -1,0 +1,17 @@
+{
+  "package_name": "",
+  "display_name": "",
+  "arch_packages": [""],
+  "aur_packages": [""],
+  "flatpak_id": "",
+  "homepage": "",
+  "category": "",
+  "sources": [
+    {
+      "type": "github_releases",
+      "repo": "owner/repo",
+      "priority": 1
+    }
+  ],
+  "notes": ""
+}

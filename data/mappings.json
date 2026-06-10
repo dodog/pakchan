@@ -1,0 +1,30 @@
+{
+  "version": "1.0",
+  "last_updated": "2024-01-15",
+  "total_packages": 0,
+  "packages": {},
+  "parsers": {
+    "github_releases": {
+      "description": "Standard GitHub Releases API",
+      "requires": ["repo"]
+    },
+    "gitlab_releases": {
+      "description": "GitLab Releases API",
+      "requires": ["host", "repo"]
+    },
+    "html_page": {
+      "description": "HTML page with release notes",
+      "requires": ["url"],
+      "optional": ["version_selector", "changes_selector"]
+    },
+    "mozilla_releases": {
+      "description": "Mozilla-style release notes page",
+      "requires": ["url"]
+    },
+    "mediawiki": {
+      "description": "MediaWiki changelog page",
+      "requires": ["url"]
+    }
+  },
+  "contributors": []
+}

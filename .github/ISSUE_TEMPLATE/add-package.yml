@@ -1,0 +1,69 @@
+name: Add Package Mapping
+description: Submit a new package's changelog source
+title: "Add: "
+labels: ["submission"]
+body:
+  - type: input
+    id: package_name
+    attributes:
+      label: Package Name
+      description: The package name as it appears in pacman/AUR
+      placeholder: e.g., vlc, firefox, gimp
+    validations:
+      required: true
+      
+  - type: input
+    id: display_name
+    attributes:
+      label: Display Name
+      description: Human-readable name (optional)
+      placeholder: e.g., VLC Media Player
+      
+  - type: input
+    id: homepage
+    attributes:
+      label: Homepage URL
+      placeholder: https://example.com
+      
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      options:
+        - Multimedia
+        - Office/Productivity
+        - Graphics/Design
+        - Browser/Internet
+        - Communication
+        - Development
+        - System/Tools
+        - Games
+        - Security
+        - Other
+        
+  - type: input
+    id: github_repo
+    attributes:
+      label: GitHub Repository (if applicable)
+      description: owner/repository format
+      placeholder: videolan/vlc
+      
+  - type: input
+    id: gitlab_repo
+    attributes:
+      label: GitLab Repository (if applicable)
+      description: host and repository path
+      placeholder: gitlab.gnome.org/GNOME/gimp
+      
+  - type: input
+    id: release_notes_url
+    attributes:
+      label: Release Notes URL
+      description: Direct URL to release notes/changelog page
+      placeholder: https://example.com/releases
+      
+  - type: textarea
+    id: additional_notes
+    attributes:
+      label: Additional Notes
+      description: Any special instructions for parsing this package's changelog
