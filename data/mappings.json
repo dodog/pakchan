@@ -206,18 +206,7 @@
         }
       ]
     },
-    "element-desktop": {
-      "name": "Element Desktop",
-      "homepage": "https://element.io/",
-      "category": "communication",
-      "sources": [
-        {
-          "type": "github_releases",
-          "repo": "element-hq/element-desktop",
-          "priority": 1
-        }
-      ]
-    },
+
     "xnviewmp": {
       "name": "XnView MP",
       "homepage": "https://www.xnview.com/",
