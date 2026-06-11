@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pakku Changelog Database - Submit Package</title>
+    <title>Pakchan - Add Changelog Source</title>
     <style>
         * {
             margin: 0;
@@ -12,587 +12,343 @@
         }
         
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-            line-height: 1.6;
-            color: #333;
-            background: #f5f5f5;
-        }
-        
-        .container {
-            max-width: 900px;
-            margin: 0 auto;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0d1117;
+            color: #c9d1d9;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
             padding: 20px;
         }
         
+        .container {
+            max-width: 600px;
+            width: 100%;
+            margin-top: 40px;
+        }
+        
         header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 30px 0;
+            text-align: center;
             margin-bottom: 30px;
         }
         
         header h1 {
-            font-size: 2.5em;
-            margin-bottom: 10px;
+            font-size: 1.8em;
+            color: #58a6ff;
+            margin-bottom: 8px;
         }
         
         header p {
-            font-size: 1.1em;
-            opacity: 0.9;
+            color: #8b949e;
+            font-size: 0.9em;
         }
         
         .card {
-            background: white;
-            border-radius: 10px;
-            padding: 25px;
-            margin-bottom: 20px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 20px;
+            margin-bottom: 16px;
         }
         
         .form-group {
-            margin-bottom: 20px;
+            margin-bottom: 16px;
         }
         
         label {
             display: block;
-            margin-bottom: 5px;
+            font-size: 0.85em;
             font-weight: 600;
-            color: #555;
+            color: #c9d1d9;
+            margin-bottom: 6px;
         }
         
         input[type="text"],
         input[type="url"],
-        select,
-        textarea {
+        select {
             width: 100%;
-            padding: 10px;
-            border: 2px solid #e0e0e0;
-            border-radius: 5px;
-            font-size: 16px;
-            transition: border-color 0.3s;
+            padding: 8px 12px;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            color: #c9d1d9;
+            font-size: 14px;
+            transition: border-color 0.2s;
         }
         
         input:focus,
-        select:focus,
-        textarea:focus {
+        select:focus {
             outline: none;
-            border-color: #667eea;
+            border-color: #58a6ff;
+            box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.1);
         }
         
-        textarea {
-            min-height: 100px;
-            font-family: monospace;
-        }
-        
-        .source-entry {
-            background: #f9f9f9;
-            padding: 15px;
-            border-radius: 8px;
-            margin-bottom: 15px;
-            border-left: 4px solid #667eea;
-        }
-        
-        .source-entry h4 {
-            margin-bottom: 10px;
-            color: #667eea;
-        }
-        
-        button {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 12px 30px;
-            border: none;
-            border-radius: 5px;
-            font-size: 16px;
+        select {
             cursor: pointer;
-            transition: transform 0.2s;
+            appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%238b949e' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10l-5 5z'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 10px center;
         }
         
-        button:hover {
-            transform: translateY(-2px);
+        .source-type-row {
+            display: flex;
+            gap: 10px;
+            align-items: end;
         }
         
-        button:disabled {
-            background: #ccc;
-            cursor: not-allowed;
-            transform: none;
+        .source-type-row .form-group {
+            flex: 1;
+            margin-bottom: 0;
         }
         
-        .btn-secondary {
-            background: #6c757d;
-            margin-left: 10px;
+        .btn {
+            padding: 8px 16px;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.2s;
         }
         
-        .help-text {
-            font-size: 0.9em;
-            color: #888;
-            margin-top: 5px;
-        }
-        
-        .badge {
-            display: inline-block;
-            padding: 3px 8px;
-            border-radius: 12px;
-            font-size: 12px;
+        .btn-primary {
+            background: #238636;
+            border-color: rgba(240, 246, 252, 0.1);
+            color: white;
+            width: 100%;
+            padding: 10px;
             font-weight: 600;
         }
         
-        .badge-required {
-            background: #ffe0e0;
-            color: #d32f2f;
+        .btn-primary:hover {
+            background: #2ea043;
         }
         
-        .badge-optional {
-            background: #e0e0e0;
-            color: #666;
+        .btn-danger {
+            background: transparent;
+            color: #f85149;
+            border-color: #f85149;
+            padding: 4px 10px;
+            font-size: 12px;
         }
         
-        .stats {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 15px;
-            margin-bottom: 30px;
+        .btn-danger:hover {
+            background: #f85149;
+            color: white;
         }
         
-        .stat-card {
-            background: white;
-            padding: 20px;
-            border-radius: 10px;
-            text-align: center;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }
-        
-        .stat-card .number {
-            font-size: 2em;
-            font-weight: bold;
-            color: #667eea;
-        }
-        
-        .stat-card .label {
-            color: #888;
-            margin-top: 5px;
+        .hint {
+            font-size: 0.8em;
+            color: #8b949e;
+            margin-top: 4px;
         }
         
         .success-message {
-            background: #e8f5e9;
-            color: #2e7d32;
-            padding: 15px;
-            border-radius: 5px;
-            margin-bottom: 20px;
+            background: #1b3424;
+            border: 1px solid #238636;
+            padding: 12px;
+            border-radius: 6px;
             display: none;
+            margin-bottom: 16px;
         }
         
         .error-message {
-            background: #fce4ec;
-            color: #c62828;
-            padding: 15px;
-            border-radius: 5px;
-            margin-bottom: 20px;
+            background: #341b1b;
+            border: 1px solid #f85149;
+            padding: 12px;
+            border-radius: 6px;
             display: none;
+            margin-bottom: 16px;
         }
         
-        @media (max-width: 600px) {
-            .container {
-                padding: 10px;
-            }
-            header h1 {
-                font-size: 1.8em;
-            }
+        .stats {
+            text-align: center;
+            font-size: 0.85em;
+            color: #8b949e;
+            margin-top: 20px;
+        }
+        
+        .stats span {
+            color: #58a6ff;
+            font-weight: 600;
         }
     </style>
 </head>
 <body>
-    <header>
-        <div class="container">
-            <h1>📦 Pakku Changelog Database</h1>
-            <p>Help improve Pakku by adding changelog sources for packages</p>
-        </div>
-    </header>
-    
     <div class="container">
-        <!-- Stats -->
-        <div class="stats">
-            <div class="stat-card">
-                <div class="number" id="totalPackages">0</div>
-                <div class="label">Packages Mapped</div>
-            </div>
-            <div class="stat-card">
-                <div class="number" id="totalSources">0</div>
-                <div class="label">Changelog Sources</div>
-            </div>
-            <div class="stat-card">
-                <div class="number" id="totalContributors">0</div>
-                <div class="label">Contributors</div>
-            </div>
-        </div>
+        <header>
+            <h1>📦 Pakchan</h1>
+            <p>Add a package's changelog source for Pakku</p>
+        </header>
         
-        <!-- Success/Error Messages -->
-        <div class="success-message" id="successMessage"></div>
+        <div class="success-message" id="successMessage">✓ Submitted! Redirecting to GitHub...</div>
         <div class="error-message" id="errorMessage"></div>
         
-        <!-- Submission Form -->
-        <div class="card">
-            <h2>Submit a New Package Mapping</h2>
-            <p class="help-text">Fill in the details below to add a new package's changelog source.</p>
-            
-            <form id="packageForm">
-                <!-- Basic Information -->
-                <h3>Basic Information</h3>
-                
+        <form id="submitForm">
+            <!-- Package Name -->
+            <div class="card">
                 <div class="form-group">
-                    <label>Package Name <span class="badge badge-required">Required</span></label>
+                    <label>Package Name *</label>
                     <input type="text" id="packageName" required 
-                           placeholder="e.g., vlc, firefox, gimp, element-desktop">
-                    <span class="help-text">The package name as it appears in pacman/AUR</span>
+                           placeholder="e.g., firefox, vlc, eidklient, xnviewmp"
+                           autocomplete="off">
+                    <div class="hint">Exact name as shown in pacman/AUR</div>
                 </div>
+            </div>
+            
+            <!-- Changelog Source -->
+            <div class="card">
+                <label style="margin-bottom: 12px;">Changelog Source *</label>
                 
                 <div class="form-group">
-                    <label>Display Name</label>
-                    <input type="text" id="displayName" 
-                           placeholder="e.g., VLC Media Player">
-                    <span class="help-text">Human-readable name (optional)</span>
-                </div>
-                
-                <div class="form-group">
-                    <label>Homepage URL</label>
-                    <input type="url" id="homepage" 
-                           placeholder="https://example.com">
-                </div>
-                
-                <div class="form-group">
-                    <label>Category</label>
-                    <select id="category">
-                        <option value="">Select category...</option>
-                        <option value="multimedia">Multimedia</option>
-                        <option value="office">Office/Productivity</option>
-                        <option value="graphics">Graphics/Design</option>
-                        <option value="browser">Browser/Internet</option>
-                        <option value="communication">Communication</option>
-                        <option value="development">Development</option>
-                        <option value="system">System/Tools</option>
-                        <option value="games">Games</option>
-                        <option value="security">Security</option>
-                        <option value="other">Other</option>
+                    <label style="font-weight: normal; color: #8b949e;">Source Type</label>
+                    <select id="sourceType">
+                        <option value="github_releases">GitHub Releases</option>
+                        <option value="gitlab_releases">GitLab Releases</option>
+                        <option value="html_page">Release Notes Page (HTML)</option>
+                        <option value="mozilla_releases">Mozilla Release Notes</option>
+                        <option value="text_file">Plain Text File</option>
+                        <option value="other">Other URL</option>
                     </select>
                 </div>
                 
-                <!-- Package Names in Different Sources -->
-                <h3>Package Names (Optional)</h3>
-                <p class="help-text">If the package has different names in other package managers</p>
-                
-                <div class="form-group">
-                    <label>AUR Package Name</label>
-                    <input type="text" id="aurPackage" 
-                           placeholder="e.g., vlc-git, firefox-nightly">
+                <!-- GitHub -->
+                <div id="fieldGithub" class="form-group">
+                    <label style="font-weight: normal; color: #8b949e;">Repository</label>
+                    <input type="text" placeholder="owner/repo (e.g., videolan/vlc)">
+                    <div class="hint">GitHub repository path</div>
                 </div>
                 
-                <div class="form-group">
-                    <label>Flatpak ID</label>
-                    <input type="text" id="flatpakId" 
-                           placeholder="e.g., org.videolan.VLC">
+                <!-- GitLab -->
+                <div id="fieldGitlab" class="form-group" style="display:none;">
+                    <label style="font-weight: normal; color: #8b949e;">GitLab Host</label>
+                    <input type="text" placeholder="gitlab.com or invent.kde.org">
+                    <div class="hint">GitLab instance domain</div>
+                </div>
+                <div id="fieldGitlabRepo" class="form-group" style="display:none;">
+                    <label style="font-weight: normal; color: #8b949e;">Repository Path</label>
+                    <input type="text" placeholder="group/project">
+                    <div class="hint">Full repository path on GitLab</div>
                 </div>
                 
-                <!-- Changelog Sources -->
-                <h3>Changelog Sources <span class="badge badge-required">Required</span></h3>
-                <p class="help-text">Add at least one source where the changelog can be found</p>
-                
-                <div id="sourcesContainer">
-                    <!-- Sources will be added here dynamically -->
+                <!-- URL -->
+                <div id="fieldUrl" class="form-group" style="display:none;">
+                    <label style="font-weight: normal; color: #8b949e;">URL</label>
+                    <input type="url" placeholder="https://example.com/releases">
+                    <div class="hint">Direct link to changelog/release notes page</div>
                 </div>
-                
-                <button type="button" onclick="addSource()" class="btn-secondary">
-                    + Add Another Source
-                </button>
-                
-                <!-- Additional Notes -->
-                <div class="form-group" style="margin-top: 20px;">
-                    <label>Additional Notes</label>
-                    <textarea id="notes" placeholder="Any special instructions for parsing this package's changelog..."></textarea>
-                </div>
-                
-                <button type="submit">Submit Package Mapping</button>
-            </form>
-        </div>
-        
-        <!-- Recent Submissions -->
-        <div class="card">
-            <h2>Recent Submissions</h2>
-            <div id="recentSubmissions">
-                <p class="help-text">Loading recent submissions...</p>
             </div>
+            
+            <button type="submit" class="btn btn-primary">Submit to GitHub →</button>
+        </form>
+        
+        <div class="stats">
+            <span id="packageCount">...</span> packages mapped in the database
         </div>
     </div>
     
     <script>
-        let sourceCount = 0;
+        // Show/hide fields based on source type
+        document.getElementById('sourceType').addEventListener('change', function() {
+            const type = this.value;
+            document.getElementById('fieldGithub').style.display = type === 'github_releases' ? 'block' : 'none';
+            document.getElementById('fieldGitlab').style.display = type === 'gitlab_releases' ? 'block' : 'none';
+            document.getElementById('fieldGitlabRepo').style.display = type === 'gitlab_releases' ? 'block' : 'none';
+            document.getElementById('fieldUrl').style.display = 
+                ['html_page', 'mozilla_releases', 'text_file', 'other'].includes(type) ? 'block' : 'none';
+        });
         
-        // Load stats on page load
-        window.onload = function() {
-            loadStats();
-            addSource(); // Add first source entry by default
-        };
+        // Load stats
+        fetch('https://raw.githubusercontent.com/dodog/pakchan/main/data/mappings.json')
+            .then(r => r.json())
+            .then(data => {
+                document.getElementById('packageCount').textContent = data.total_packages || 0;
+            })
+            .catch(() => {
+                document.getElementById('packageCount').textContent = 'many';
+            });
         
-        function loadStats() {
-            fetch('https://api.github.com/repos/YOUR_USERNAME/pakku-changelog-db/contents/data/mappings.json')
-                .then(response => response.json())
-                .then(data => {
-                    const content = JSON.parse(atob(data.content));
-                    document.getElementById('totalPackages').textContent = 
-                        Object.keys(content.packages || {}).length;
-                    // Calculate other stats...
-                })
-                .catch(() => {
-                    document.getElementById('totalPackages').textContent = '...';
-                });
-        }
-        
-        function addSource() {
-            sourceCount++;
-            const container = document.getElementById('sourcesContainer');
-            
-            const sourceDiv = document.createElement('div');
-            sourceDiv.className = 'source-entry';
-            sourceDiv.id = `source-${sourceCount}`;
-            
-            sourceDiv.innerHTML = `
-                <h4>Source #${sourceCount}</h4>
-                
-                <div class="form-group">
-                    <label>Source Type <span class="badge badge-required">Required</span></label>
-                    <select name="sourceType-${sourceCount}" onchange="updateSourceFields(${sourceCount})">
-                        <option value="">Select type...</option>
-                        <option value="github_releases">GitHub Releases</option>
-                        <option value="gitlab_releases">GitLab Releases</option>
-                        <option value="html_page">HTML Release Notes Page</option>
-                        <option value="mozilla_releases">Mozilla-style Releases</option>
-                        <option value="mediawiki">MediaWiki Changelog</option>
-                        <option value="rss_feed">RSS Feed</option>
-                        <option value="releasebot">ReleaseBot.io</option>
-                        <option value="other">Other/Custom</option>
-                    </select>
-                </div>
-                
-                <div id="sourceFields-${sourceCount}"></div>
-                
-                <div class="form-group">
-                    <label>Priority</label>
-                    <select name="priority-${sourceCount}">
-                        <option value="1">1 - Primary</option>
-                        <option value="2">2 - Secondary</option>
-                        <option value="3">3 - Fallback</option>
-                    </select>
-                    <span class="help-text">Lower number = tried first</span>
-                </div>
-                
-                ${sourceCount > 1 ? `<button type="button" onclick="removeSource(${sourceCount})" class="btn-secondary">Remove This Source</button>` : ''}
-            `;
-            
-            container.appendChild(sourceDiv);
-        }
-        
-        function updateSourceFields(sourceId) {
-            const type = document.querySelector(`select[name="sourceType-${sourceId}"]`).value;
-            const fieldsDiv = document.getElementById(`sourceFields-${sourceId}`);
-            
-            let fields = '';
-            
-            switch(type) {
-                case 'github_releases':
-                    fields = `
-                        <div class="form-group">
-                            <label>GitHub Repository <span class="badge badge-required">Required</span></label>
-                            <input type="text" name="repo-${sourceId}" required 
-                                   placeholder="owner/repository (e.g., videolan/vlc)">
-                        </div>
-                    `;
-                    break;
-                    
-                case 'gitlab_releases':
-                    fields = `
-                        <div class="form-group">
-                            <label>GitLab Host <span class="badge badge-required">Required</span></label>
-                            <input type="text" name="host-${sourceId}" required 
-                                   placeholder="gitlab.com or gitlab.gnome.org">
-                        </div>
-                        <div class="form-group">
-                            <label>Repository Path <span class="badge badge-required">Required</span></label>
-                            <input type="text" name="repo-${sourceId}" required 
-                                   placeholder="group/project (e.g., GNOME/gimp)">
-                        </div>
-                    `;
-                    break;
-                    
-                case 'html_page':
-                case 'mozilla_releases':
-                case 'mediawiki':
-                    fields = `
-                        <div class="form-group">
-                            <label>URL <span class="badge badge-required">Required</span></label>
-                            <input type="url" name="url-${sourceId}" required 
-                                   placeholder="https://example.com/releases">
-                        </div>
-                    `;
-                    break;
-                    
-                case 'rss_feed':
-                    fields = `
-                        <div class="form-group">
-                            <label>RSS Feed URL <span class="badge badge-required">Required</span></label>
-                            <input type="url" name="url-${sourceId}" required 
-                                   placeholder="https://example.com/feed.xml">
-                        </div>
-                    `;
-                    break;
-                    
-                case 'releasebot':
-                    fields = `
-                        <div class="form-group">
-                            <label>ReleaseBot Project <span class="badge badge-required">Required</span></label>
-                            <input type="text" name="project-${sourceId}" required 
-                                   placeholder="vendor/project (e.g., mozilla/firefox)">
-                            <span class="help-text">The project identifier on releasebot.io</span>
-                        </div>
-                    `;
-                    break;
-                    
-                case 'other':
-                    fields = `
-                        <div class="form-group">
-                            <label>URL <span class="badge badge-required">Required</span></label>
-                            <input type="url" name="url-${sourceId}" required>
-                        </div>
-                        <div class="form-group">
-                            <label>Description</label>
-                            <textarea name="description-${sourceId}" 
-                                      placeholder="Describe how to parse this source..."></textarea>
-                        </div>
-                    `;
-                    break;
-            }
-            
-            fieldsDiv.innerHTML = fields;
-        }
-        
-        function removeSource(sourceId) {
-            document.getElementById(`source-${sourceId}`).remove();
-        }
-        
-        document.getElementById('packageForm').onsubmit = async function(e) {
+        // Form submission
+        document.getElementById('submitForm').addEventListener('submit', function(e) {
             e.preventDefault();
             
-            const formData = new FormData(e.target);
-            const packageData = {
-                package_name: document.getElementById('packageName').value,
-                display_name: document.getElementById('displayName').value,
-                homepage: document.getElementById('homepage').value,
-                category: document.getElementById('category').value,
-                aur_package: document.getElementById('aurPackage').value,
-                flatpak_id: document.getElementById('flatpakId').value,
-                sources: [],
-                notes: document.getElementById('notes').value
-            };
+            const packageName = document.getElementById('packageName').value.trim();
+            const sourceType = document.getElementById('sourceType').value;
             
-            // Collect all sources
-            for (let i = 1; i <= sourceCount; i++) {
-                const sourceDiv = document.getElementById(`source-${i}`);
-                if (!sourceDiv) continue;
-                
-                const type = formData.get(`sourceType-${i}`);
-                if (!type) continue;
-                
-                const source = {
-                    type: type,
-                    priority: parseInt(formData.get(`priority-${i}`)) || 1
-                };
-                
-                // Add type-specific fields
-                switch(type) {
-                    case 'github_releases':
-                        source.repo = formData.get(`repo-${i}`);
-                        break;
-                    case 'gitlab_releases':
-                        source.host = formData.get(`host-${i}`);
-                        source.repo = formData.get(`repo-${i}`);
-                        break;
-                    case 'html_page':
-                    case 'mozilla_releases':
-                    case 'mediawiki':
-                    case 'rss_feed':
-                        source.url = formData.get(`url-${i}`);
-                        break;
-                    case 'releasebot':
-                        source.project = formData.get(`project-${i}`);
-                        break;
-                    case 'other':
-                        source.url = formData.get(`url-${i}`);
-                        source.description = formData.get(`description-${i}`);
-                        break;
-                }
-                
-                packageData.sources.push(source);
-            }
-            
-            // Validate
-            if (!packageData.package_name || packageData.sources.length === 0) {
-                showError('Please fill in at least the package name and one source');
+            if (!packageName) {
+                showError('Please enter a package name');
                 return;
             }
             
-            // Submit via GitHub Issues API
-            try {
-                const issueBody = generateIssueBody(packageData);
-                const issueUrl = `https://github.com/YOUR_USERNAME/pakku-changelog-db/issues/new?title=${encodeURIComponent('Add: ' + packageData.package_name)}&body=${encodeURIComponent(issueBody)}&labels=submission`;
-                
-                showSuccess('Thank you! You will be redirected to GitHub to complete the submission.');
-                setTimeout(() => {
-                    window.open(issueUrl, '_blank');
-                }, 1500);
-                
-            } catch (error) {
-                showError('Error submitting: ' + error.message);
+            // Build the submission data
+            let source = { type: sourceType, priority: 1 };
+            
+            if (sourceType === 'github_releases') {
+                const repo = document.querySelector('#fieldGithub input').value.trim();
+                if (!repo || !repo.includes('/')) {
+                    showError('Please enter a valid GitHub repository (owner/repo)');
+                    return;
+                }
+                source.repo = repo;
+            } else if (sourceType === 'gitlab_releases') {
+                const host = document.querySelector('#fieldGitlab input').value.trim();
+                const repo = document.querySelector('#fieldGitlabRepo input').value.trim();
+                if (!host || !repo) {
+                    showError('Please enter GitLab host and repository path');
+                    return;
+                }
+                source.host = host;
+                source.repo = repo;
+            } else {
+                const url = document.querySelector('#fieldUrl input').value.trim();
+                if (!url || !url.startsWith('http')) {
+                    showError('Please enter a valid URL starting with http:// or https://');
+                    return;
+                }
+                source.url = url;
+                if (sourceType === 'mozilla_releases') {
+                    source.parser = 'mozilla';
+                } else if (sourceType === 'text_file') {
+                    source.parser = 'plain_text';
+                }
             }
-        };
-        
-        function generateIssueBody(data) {
-            return `### Package Information
-- **Package Name**: ${data.package_name}
-- **Display Name**: ${data.display_name || 'N/A'}
-- **Homepage**: ${data.homepage || 'N/A'}
-- **Category**: ${data.category || 'N/A'}
+            
+            // Build the issue body
+            const body = `### Package: ${packageName}
 
-### Additional Package Names
-- AUR: ${data.aur_package || 'N/A'}
-- Flatpak: ${data.flatpak_id || 'N/A'}
+**Source Type:** ${sourceType}
+${source.repo ? `**Repository:** ${source.repo}` : ''}
+${source.host ? `**Host:** ${source.host}` : ''}
+${source.url ? `**URL:** ${source.url}` : ''}
 
-### Changelog Sources
-${data.sources.map((s, i) => `
-#### Source ${i + 1}
-- Type: ${s.type}
-- Priority: ${s.priority}
-${Object.entries(s).filter(([k]) => !['type', 'priority'].includes(k)).map(([k, v]) => `- ${k}: ${v}`).join('\n')}
-`).join('\n')}
-
-### Additional Notes
-${data.notes || 'None'}
+\`\`\`json
+${JSON.stringify({package_name: packageName, sources: [source]}, null, 2)}
+\`\`\`
 
 ---
-*Submitted via the Pakku Changelog Database web form*`;
-        }
+*Submitted via [Pakchan web form](https://dodog.github.io/pakchan/web/)*`;
+
+            // Open GitHub issue
+            const title = `Add: ${packageName}`;
+            const url = `https://github.com/dodog/pakchan/issues/new?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}&labels=submission`;
+            
+            showSuccess();
+            setTimeout(() => {
+                window.open(url, '_blank');
+            }, 1000);
+        });
         
-        function showSuccess(message) {
-            const el = document.getElementById('successMessage');
-            el.textContent = message;
-            el.style.display = 'block';
+        function showSuccess() {
+            document.getElementById('successMessage').style.display = 'block';
             document.getElementById('errorMessage').style.display = 'none';
-            setTimeout(() => el.style.display = 'none', 5000);
         }
         
-        function showError(message) {
+        function showError(msg) {
             const el = document.getElementById('errorMessage');
-            el.textContent = message;
+            el.textContent = '✗ ' + msg;
             el.style.display = 'block';
             document.getElementById('successMessage').style.display = 'none';
-            setTimeout(() => el.style.display = 'none', 5000);
+            setTimeout(() => el.style.display = 'none', 4000);
         }
     </script>
 </body>
