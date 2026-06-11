@@ -169,6 +169,16 @@
         }
       ]
     },
+    "gramps": {
+      "name": "gramps",
+      "sources": [
+        {
+          "priority": 1,
+          "repo": "gramps-project/gramps",
+          "type": "github_releases"
+        }
+      ]
+    },
     "handbrake": {
       "category": "multimedia",
       "homepage": "https://handbrake.fr/",
@@ -394,6 +404,6 @@
     "thunderbird": "https://www.thunderbird.net/en-US/thunderbird/releases/",
     "vlc": "https://www.videolan.org/vlc/releases/"
   },
-  "total_packages": 19,
+  "total_packages": 20,
   "version": "1.1"
 }
