@@ -1,0 +1,149 @@
+name: Process Submission
+
+on:
+  issues:
+    types: [labeled]
+
+jobs:
+  process:
+    # Only run when 'validated' label is added
+    if: github.event.label.name == 'validated'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: write
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Process Submission
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          python3 << 'PYEOF'
+          import json, os, re, sys
+          
+          body = os.environ['ISSUE_BODY']
+          title = os.environ['ISSUE_TITLE']
+          issue_num = os.environ['ISSUE_NUMBER']
+          
+          print(f"Processing issue #{issue_num}: {title}")
+          
+          # Extract JSON from the issue body
+          json_match = re.search(r'```json\s*\n(.*?)\n```', body, re.DOTALL)
+          if not json_match:
+              print("ERROR: No JSON block found in issue body")
+              sys.exit(1)
+          
+          try:
+              data = json.loads(json_match.group(1))
+          except json.JSONDecodeError as e:
+              print(f"ERROR: Invalid JSON: {e}")
+              sys.exit(1)
+          
+          pkg_name = data.get('package_name', '').lower().strip()
+          if not pkg_name:
+              print("ERROR: No package name found")
+              sys.exit(1)
+          
+          sources = data.get('sources', [])
+          if not sources:
+              print("ERROR: No sources found")
+              sys.exit(1)
+          
+          print(f"Package: {pkg_name}")
+          print(f"Sources: {len(sources)}")
+          
+          # Load current mappings
+          with open('data/mappings.json') as f:
+              mappings = json.load(f)
+          
+          # Add new package
+          mappings['packages'][pkg_name] = {
+              'name': data.get('name', pkg_name),
+              'sources': sources
+          }
+          mappings['total_packages'] = len(mappings['packages'])
+          mappings['last_updated'] = '2024-12-15'  # Update this date
+          
+          # Save
+          with open('data/mappings.json', 'w') as f:
+              json.dump(mappings, f, indent=2, sort_keys=True)
+          
+          print(f"✓ Added {pkg_name} to mappings")
+          print(f"  Total packages: {mappings['total_packages']}")
+          
+          # Save package name for commit message
+          with open('/tmp/pkg_name.txt', 'w') as f:
+              f.write(pkg_name)
+          PYEOF
+      
+      - name: Commit and Push
+        run: |
+          PKG_NAME=$(cat /tmp/pkg_name.txt)
+          git config --global user.name 'pakchan-bot[bot]'
+          git config --global user.email 'pakchan-bot[bot]@users.noreply.github.com'
+          git add data/mappings.json
+          git diff --staged --quiet || git commit -m "Add ${PKG_NAME} from issue #${{ github.event.issue.number }}"
+          git push
+      
+      - name: Comment on Issue
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pkgName = require('fs').readFileSync('/tmp/pkg_name.txt', 'utf8').trim();
+            
+            // Add 'added' label
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ['added']
+            });
+            
+            // Remove 'validated' label (optional)
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                name: 'validated'
+              });
+            } catch(e) {}
+            
+            // Post success comment
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `✅ **Added to the database!**\n\nPackage \`${pkgName}\` is now available in Pakchan.\n\nThank you for your contribution! 🎉`
+            });
+            
+            // Close the issue
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              state: 'closed'
+            });
+      
+      - name: Comment on Failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: '❌ **Failed to process this submission.**\n\nPlease check the JSON format in the issue body. It should contain a valid JSON block with `package_name` and `sources`.'
+            });
