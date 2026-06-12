@@ -30,50 +30,60 @@ jobs:
         run: |
           python3 << 'PYEOF'
           import json, os, re, sys
+
+          # Parse the simplified format
+          import re
           
-          body = os.environ['ISSUE_BODY']
-          title = os.environ['ISSUE_TITLE']
-          issue_num = os.environ['ISSUE_NUMBER']
-          
-          print(f"Processing issue #{issue_num}: {title}")
-          
-          # Extract JSON from the issue body
-          json_match = re.search(r'```json\s*\n(.*?)\n```', body, re.DOTALL)
-          if not json_match:
-              print("ERROR: No JSON block found in issue body")
+          # Extract the JSON-like block from the issue
+          block_match = re.search(r'"(github|gitlab|release_pages|custom|releasebot)"\s*:\s*\{([^}]+)\}', body, re.DOTALL)
+          if not block_match:
+              print("ERROR: Could not parse submission format")
               sys.exit(1)
+          
+          section = block_match.group(1)
+          content = "{" + block_match.group(2) + "}"
           
           try:
-              data = json.loads(json_match.group(1))
-          except json.JSONDecodeError as e:
-              print(f"ERROR: Invalid JSON: {e}")
+              data = json.loads(content)
+          except:
+              print("ERROR: Invalid format")
               sys.exit(1)
           
-          pkg_name = data.get('package_name', '').lower().strip()
-          if not pkg_name:
-              print("ERROR: No package name found")
-              sys.exit(1)
-          
-          sources = data.get('sources', [])
-          if not sources:
-              print("ERROR: No sources found")
-              sys.exit(1)
+          # Get the first (and only) key
+          pkg_name = list(data.keys())[0].lower().strip()
+          value = data[pkg_name]
           
           print(f"Package: {pkg_name}")
-          print(f"Sources: {len(sources)}")
+          print(f"Section: {section}")
+          print(f"Value: {value}")
           
           # Load current mappings
           with open('data/mappings.json') as f:
               mappings = json.load(f)
           
-          # Add new package
-          mappings['packages'][pkg_name] = {
-              'name': data.get('name', pkg_name),
-              'sources': sources
-          }
-          mappings['total_packages'] = len(mappings['packages'])
-          mappings['last_updated'] = '2024-12-15'  # Update this date
+          # Ensure section exists
+          if section not in mappings:
+              mappings[section] = {}
           
+          # Add the package
+          if section in ["github", "release_pages", "releasebot"]:
+              mappings[section][pkg_name] = value
+          elif section in ["gitlab", "custom"]:
+              mappings[section][pkg_name] = value
+          
+          # Update total count
+          total = 0
+          for key in ["github", "gitlab", "release_pages", "custom"]:
+              if key in mappings:
+                  total += len(mappings[key])
+          if "releasebot" in mappings:
+              total += len(mappings["releasebot"])
+          mappings["total_packages"] = total
+
+
+
+          
+                
           # Save
           with open('data/mappings.json', 'w') as f:
               json.dump(mappings, f, indent=2, sort_keys=True)
