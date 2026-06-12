@@ -1,68 +1,100 @@
 {
-  "_comment": "Pakku / Pakchan upstream changelog mappings. Add entries here \u2014 pakku fetches this at startup.",
+  "_comment": "Pakku / Pakchan upstream changelog mappings. Edit this file to add or update entries.",
+  "_version": 2,
+
   "github": {
-    "alacritty": "alacritty/alacritty",
-    "aria2": "aria2/aria2",
-    "audacity": "audacity/audacity",
-    "bitwarden": "bitwarden/clients",
-    "btop": "aristocratos/btop",
-    "calibre": "kovidgoyal/calibre",
-    "curl": "curl/curl",
-    "darktable": "darktable-org/darktable",
-    "doublecmd": "doublecmd/doublecmd",
-    "fastfetch": "fastfetch-cli/fastfetch",
-    "ffmpeg": "FFmpeg/FFmpeg",
-    "handbrake": "HandBrake/HandBrake",
-    "helix": "helix-editor/helix",
-    "htop": "htop-dev/htop",
-    "keepassxc": "keepassxc/keepassxc",
-    "kitty": "kovidgoyal/kitty",
-    "mpv": "mpv-player/mpv",
-    "neofetch": "dylanaraps/neofetch",
-    "neovim": "neovim/neovim",
-    "obs-studio": "obsproject/obs-studio",
-    "pcmanfm": "lxde/pcmanfm",
-    "pinta": "PintaProject/Pinta",
-    "qbittorrent": "qbittorrent/qBittorrent",
-    "rawtherapee": "Beep6581/RawTherapee",
-    "thunar": "xfce/thunar",
-    "transmission": "transmission/transmission",
-    "veracrypt": "veracrypt/VeraCrypt",
-    "vim": "vim/vim",
-    "vscodium": "VSCodium/vscodium",
-    "wireshark": "wireshark/wireshark",
-    "zulucrypt": "mhogomchungu/zuluCrypt",
-    "zulumount": "mhogomchungu/zuluCrypt"
+    "obs-studio":       "obsproject/obs-studio",
+    "handbrake":        "HandBrake/HandBrake",
+    "doublecmd":        "doublecmd/doublecmd",
+    "pcmanfm":          "lxde/pcmanfm",
+    "thunar":           "xfce/thunar",
+    "alacritty":        "alacritty/alacritty",
+    "kitty":            "kovidgoyal/kitty",
+    "htop":             "htop-dev/htop",
+    "btop":             "aristocratos/btop",
+    "neofetch":         "dylanaraps/neofetch",
+    "fastfetch":        "fastfetch-cli/fastfetch",
+    "zulucrypt":        "mhogomchungu/zuluCrypt",
+    "zulumount":        "mhogomchungu/zuluCrypt",
+    "keepassxc":        "keepassxc/keepassxc",
+    "bitwarden":        "bitwarden/clients",
+    "veracrypt":        "veracrypt/VeraCrypt",
+    "vscodium":         "VSCodium/vscodium",
+    "vim":              "vim/vim",
+    "neovim":           "neovim/neovim",
+    "helix":            "helix-editor/helix",
+    "curl":             "curl/curl",
+    "aria2":            "aria2/aria2",
+    "qbittorrent":      "qbittorrent/qBittorrent",
+    "transmission-gtk": "transmission/transmission",
+    "transmission-qt":  "transmission/transmission",
+    "wireshark-qt":     "wireshark/wireshark",
+    "audacity":         "audacity/audacity",
+    "calibre":          "kovidgoyal/calibre",
+    "pinta":            "PintaProject/Pinta",
+    "rawtherapee":      "Beep6581/RawTherapee",
+    "darktable":        "darktable-org/darktable",
+    "mpv":              "mpv-player/mpv",
+    "ffmpeg":           "FFmpeg/FFmpeg",
+    "vlc":              "videolan/vlc",
+    "shotcut":          "mltframework/shotcut",
+    "kdenlive":         "KDE/kdenlive",
+    "libreoffice-fresh":"LibreOffice/core",
+    "libreoffice-still":"LibreOffice/core",
+    "nodejs":           "nodejs/node",
+    "go":               "golang/go",
+    "rust":             "rust-lang/rust",
+    "docker":           "moby/moby",
+    "podman":           "containers/podman",
+    "steam":            "ValveSoftware/steam-for-linux",
+    "discord":          "discord/discord-linux",
+    "telegram-desktop": "telegramdesktop/tdesktop",
+    "signal-desktop":   "signalapp/Signal-Desktop"
   },
+
   "gitlab": {
-    "blender": {
-      "host": "projects.blender.org",
-      "repo": "blender/blender"
-    },
-    "digikam": {
-      "host": "invent.kde.org",
-      "repo": "graphics/digikam"
-    },
-    "gimp": {
-      "host": "gitlab.gnome.org",
-      "repo": "GNOME/gimp"
-    },
-    "gthumb": {
-      "host": "gitlab.gnome.org",
-      "repo": "GNOME/gthumb"
-    },
-    "inkscape": {
-      "host": "gitlab.com",
-      "repo": "inkscape/inkscape"
-    },
-    "krita": {
-      "host": "invent.kde.org",
-      "repo": "graphics/krita"
-    },
-    "rhythmbox": {
-      "host": "gitlab.gnome.org",
-      "repo": "GNOME/rhythmbox"
-    }
+    "inkscape":  { "host": "gitlab.com",           "repo": "inkscape/inkscape"  },
+    "krita":     { "host": "invent.kde.org",        "repo": "graphics/krita"     },
+    "gimp":      { "host": "gitlab.gnome.org",      "repo": "GNOME/gimp"         },
+    "gthumb":    { "host": "gitlab.gnome.org",      "repo": "GNOME/gthumb"       },
+    "rhythmbox": { "host": "gitlab.gnome.org",      "repo": "GNOME/rhythmbox"    },
+    "digikam":   { "host": "invent.kde.org",        "repo": "graphics/digikam"   },
+    "gwenview":  { "host": "invent.kde.org",        "repo": "graphics/gwenview"  },
+    "dolphin":   { "host": "invent.kde.org",        "repo": "system/dolphin"     },
+    "konsole":   { "host": "invent.kde.org",        "repo": "utilities/konsole"  },
+    "okular":    { "host": "invent.kde.org",        "repo": "graphics/okular"    },
+    "spectacle": { "host": "invent.kde.org",        "repo": "graphics/spectacle" }
+  },
+
+  "release_pages": {
+    "firefox":           "https://www.mozilla.org/en-US/firefox/releases/",
+    "firefox-esr":       "https://www.mozilla.org/en-US/firefox/releases/",
+    "thunderbird":       "https://www.thunderbird.net/en-US/thunderbird/releases/",
+    "filezilla":         "https://filezilla-project.org/versions.php",
+    "blender":           "https://www.blender.org/download/releases/",
+    "python":            "https://docs.python.org/3/whatsnew/",
+    "chromium":          "https://chromereleases.googleblog.com/search/label/Stable%20updates"
+  
+    "audacity": "https://www.audacityteam.org/category/release/",
+    "blender": "https://www.blender.org/download/releases/",
+    "chromium": "https://chromereleases.googleblog.com/search/label/Stable%20updates",
+    "docker": "https://docs.docker.com/engine/release-notes/",
+    "filezilla": "https://filezilla-project.org/versions.php",
+    "firefox": "https://www.mozilla.org/en-US/firefox/releases/",
+    "firefox-esr": "https://www.mozilla.org/en-US/firefox/releases/",
+    "gimp": "https://www.gimp.org/news/",
+    "go": "https://go.dev/blog/",
+    "inkscape": "https://inkscape.org/release/",
+    "krita": "https://krita.org/en/category/releases/",
+    "libreoffice-fresh": "https://wiki.documentfoundation.org/Releases",
+    "libreoffice-still": "https://wiki.documentfoundation.org/Releases",
+    "nodejs": "https://nodejs.org/en/blog/release/",
+    "python": "https://docs.python.org/3/whatsnew/",
+    "rust": "https://blog.rust-lang.org/",
+    "thunderbird": "https://www.thunderbird.net/en-US/thunderbird/releases/",
+    "vlc": "https://www.videolan.org/vlc/releases/"
+  }, 
+  
   },
   "last_updated": "2024-12-15",
   "packages": {
@@ -384,26 +416,7 @@
       ]
     }
   },
-  "release_pages": {
-    "audacity": "https://www.audacityteam.org/category/release/",
-    "blender": "https://www.blender.org/download/releases/",
-    "chromium": "https://chromereleases.googleblog.com/search/label/Stable%20updates",
-    "docker": "https://docs.docker.com/engine/release-notes/",
-    "filezilla": "https://filezilla-project.org/versions.php",
-    "firefox": "https://www.mozilla.org/en-US/firefox/releases/",
-    "firefox-esr": "https://www.mozilla.org/en-US/firefox/releases/",
-    "gimp": "https://www.gimp.org/news/",
-    "go": "https://go.dev/blog/",
-    "inkscape": "https://inkscape.org/release/",
-    "krita": "https://krita.org/en/category/releases/",
-    "libreoffice-fresh": "https://wiki.documentfoundation.org/Releases",
-    "libreoffice-still": "https://wiki.documentfoundation.org/Releases",
-    "nodejs": "https://nodejs.org/en/blog/release/",
-    "python": "https://docs.python.org/3/whatsnew/",
-    "rust": "https://blog.rust-lang.org/",
-    "thunderbird": "https://www.thunderbird.net/en-US/thunderbird/releases/",
-    "vlc": "https://www.videolan.org/vlc/releases/"
-  },
+
   "total_packages": 20,
   "version": "1.1"
 }
