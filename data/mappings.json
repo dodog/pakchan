@@ -51,13 +51,13 @@
     "steam":            "ValveSoftware/steam-for-linux",
     "discord":          "discord/discord-linux",
     "telegram-desktop": "telegramdesktop/tdesktop",
-    "signal-desktop":   "signalapp/Signal-Desktop"
+    "signal-desktop":   "signalapp/Signal-Desktop",
+    "gramps":           "gramps-project/gramps"
   },
 
   "gitlab": {
     "inkscape":  { "host": "gitlab.com",           "repo": "inkscape/inkscape"  },
     "krita":     { "host": "invent.kde.org",        "repo": "graphics/krita"     },
-    "gimp":      { "host": "gitlab.gnome.org",      "repo": "GNOME/gimp"         },
     "gthumb":    { "host": "gitlab.gnome.org",      "repo": "GNOME/gthumb"       },
     "rhythmbox": { "host": "gitlab.gnome.org",      "repo": "GNOME/rhythmbox"    },
     "digikam":   { "host": "invent.kde.org",        "repo": "graphics/digikam"   },
@@ -73,15 +73,16 @@
     "firefox-esr":       "https://www.mozilla.org/en-US/firefox/releases/",
     "thunderbird":       "https://www.thunderbird.net/en-US/thunderbird/releases/",
     "filezilla":         "https://filezilla-project.org/versions.php",
-    "libreoffice-still": "https://wiki.documentfoundation.org/ReleaseNotes/",
-    "libreoffice-fresh": "https://wiki.documentfoundation.org/ReleaseNotes/",
+    "libreoffice-still": "https://www.libreoffice.org/release-notes/",
+    "libreoffice-fresh": "https://www.libreoffice.org/release-notes/",
     "vlc": "https://www.videolan.org/vlc/releases/",
     "gimp": "https://www.gimp.org/release-notes/",
     "krita": "https://krita.org/en/release-notes/",
-    "inkscape": "https://inkscape.org/release/",
+    "keepass":   "https://keepass.info/news/news_all.html",
     "blender":           "https://www.blender.org/download/releases/",
     "python":            "https://docs.python.org/3/whatsnew/",
     "chromium":          "https://chromereleases.googleblog.com/search/label/Stable%20updates",
+    "electrum": "https://github.com/spesmilo/electrum/blob/master/RELEASE-NOTES",
     "virtualbox": "https://www.virtualbox.org/wiki/Changelog"
   },
   
@@ -94,10 +95,6 @@
       "url": "https://eidas.minv.sk/downloadservice/eidklient/linux/eID_klient_release_notes.txt",
       "parser": "text_file"
     }
-  },
+  }
   
-  "releasebot": [
-    "firefox",
-    "chromium"
-  ]
 }
