@@ -237,19 +237,43 @@
         let allPackages = {};
         let currentFilter = 'all';
         
-        // Load data
+
         fetch('https://raw.githubusercontent.com/dodog/pakchan/main/data/mappings.json')
             .then(r => r.json())
             .then(data => {
-                allPackages = data.packages || {};
-                document.getElementById('totalCount').textContent = data.total_packages || Object.keys(allPackages).length;
-                document.getElementById('lastUpdated').textContent = data.last_updated || 'unknown';
+                // Flatten all sections into one list
+                allPackages = {};
+                
+                // GitHub
+                for (const [name, repo] of Object.entries(data.github || {})) {
+                    allPackages[name] = { name, type: 'github_releases', value: repo };
+                }
+                // GitLab
+                for (const [name, gl] of Object.entries(data.gitlab || {})) {
+                    allPackages[name] = { name, type: 'gitlab_releases', value: `${gl.host}/${gl.repo}` };
+                }
+                // Release pages
+                for (const [name, url] of Object.entries(data.release_pages || {})) {
+                    allPackages[name] = { name, type: 'html_page', value: url };
+                }
+                // Custom
+                for (const [name, custom] of Object.entries(data.custom || {})) {
+                    allPackages[name] = { name, type: custom.parser || 'custom', value: custom.url };
+                }
+                
+                document.getElementById('totalCount').textContent = Object.keys(allPackages).length;
+                document.getElementById('lastUpdated').textContent = data.last_updated || '?';
                 renderPackages();
-            })
-            .catch(err => {
-                document.getElementById('packageList').innerHTML = 
-                    '<div class="empty">⚠️ Could not load package data</div>';
             });
+
+
+
+
+
+
+
+
+
         
         // Search
         document.getElementById('searchInput').addEventListener('input', renderPackages);

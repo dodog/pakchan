@@ -344,38 +344,38 @@
                 console.warn('Could not check for duplicates:', err);
             }
             
-            // Build the submission data
-            let source = { type: sourceType, priority: 1 };
-            
+
+
+
+            // Build the submission data in new simplified format
+            let jsonBlock = '';
             if (sourceType === 'github_releases') {
                 const repo = document.querySelector('#fieldGithub input').value.trim();
-                if (!repo || !repo.includes('/')) {
-                    showError('Please enter a valid GitHub repository (owner/repo)');
-                    return;
-                }
-                source.repo = repo;
+                jsonBlock = `"github": {\n  "${packageName}": "${repo}"\n}`;
             } else if (sourceType === 'gitlab_releases') {
                 const host = document.querySelector('#fieldGitlab input').value.trim();
                 const repo = document.querySelector('#fieldGitlabRepo input').value.trim();
-                if (!host || !repo) {
-                    showError('Please enter GitLab host and repository path');
-                    return;
-                }
-                source.host = host;
-                source.repo = repo;
+                jsonBlock = `"gitlab": {\n  "${packageName}": { "host": "${host}", "repo": "${repo}" }\n}`;
+            } else if (sourceType === 'html_page' || sourceType === 'mozilla_releases') {
+                const url = document.querySelector('#fieldUrl input').value.trim();
+                jsonBlock = `"release_pages": {\n  "${packageName}": "${url}"\n}`;
+            } else if (sourceType === 'text_file') {
+                const url = document.querySelector('#fieldUrl input').value.trim();
+                jsonBlock = `"custom": {\n  "${packageName}": { "url": "${url}", "parser": "text_file" }\n}`;
             } else {
                 const url = document.querySelector('#fieldUrl input').value.trim();
-                if (!url || !url.startsWith('http')) {
-                    showError('Please enter a valid URL starting with http:// or https://');
-                    return;
-                }
-                source.url = url;
-                if (sourceType === 'mozilla_releases') {
-                    source.parser = 'mozilla';
-                } else if (sourceType === 'text_file') {
-                    source.parser = 'plain_text';
-                }
+                jsonBlock = `"release_pages": {\n  "${packageName}": "${url}"\n}`;
             }
+
+
+
+
+
+
+
+
+            
+
             
             // Build the issue body
             const body = `### Package: ${packageName}
