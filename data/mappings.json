@@ -1,6 +1,8 @@
 {
   "_comment": "Pakku / Pakchan upstream changelog mappings. Edit this file to add or update entries.",
   "_version": 2,
+  "last_updated": "2024-12-15",
+  "total_packages": 0,
 
   "github": {
     "obs-studio":       "obsproject/obs-studio",
@@ -71,352 +73,31 @@
     "firefox-esr":       "https://www.mozilla.org/en-US/firefox/releases/",
     "thunderbird":       "https://www.thunderbird.net/en-US/thunderbird/releases/",
     "filezilla":         "https://filezilla-project.org/versions.php",
+    "libreoffice-still": "https://wiki.documentfoundation.org/ReleaseNotes/",
+    "libreoffice-fresh": "https://wiki.documentfoundation.org/ReleaseNotes/",
+    "vlc": "https://www.videolan.org/vlc/releases/",
+    "gimp": "https://www.gimp.org/release-notes/",
+    "krita": "https://krita.org/en/release-notes/",
+    "inkscape": "https://inkscape.org/release/",
     "blender":           "https://www.blender.org/download/releases/",
     "python":            "https://docs.python.org/3/whatsnew/",
-    "chromium":          "https://chromereleases.googleblog.com/search/label/Stable%20updates"
-  
-    "audacity": "https://www.audacityteam.org/category/release/",
-    "blender": "https://www.blender.org/download/releases/",
-    "chromium": "https://chromereleases.googleblog.com/search/label/Stable%20updates",
-    "docker": "https://docs.docker.com/engine/release-notes/",
-    "filezilla": "https://filezilla-project.org/versions.php",
-    "firefox": "https://www.mozilla.org/en-US/firefox/releases/",
-    "firefox-esr": "https://www.mozilla.org/en-US/firefox/releases/",
-    "gimp": "https://www.gimp.org/news/",
-    "go": "https://go.dev/blog/",
-    "inkscape": "https://inkscape.org/release/",
-    "krita": "https://krita.org/en/category/releases/",
-    "libreoffice-fresh": "https://wiki.documentfoundation.org/Releases",
-    "libreoffice-still": "https://wiki.documentfoundation.org/Releases",
-    "nodejs": "https://nodejs.org/en/blog/release/",
-    "python": "https://docs.python.org/3/whatsnew/",
-    "rust": "https://blog.rust-lang.org/",
-    "thunderbird": "https://www.thunderbird.net/en-US/thunderbird/releases/",
-    "vlc": "https://www.videolan.org/vlc/releases/"
-  }, 
-  
+    "chromium":          "https://chromereleases.googleblog.com/search/label/Stable%20updates",
+    "virtualbox": "https://www.virtualbox.org/wiki/Changelog"
   },
-  "last_updated": "2024-12-15",
-  "packages": {
-    "audacity": {
-      "category": "multimedia",
-      "homepage": "https://www.audacityteam.org/",
-      "name": "Audacity",
-      "sources": [
-        {
-          "priority": 1,
-          "repo": "audacity/audacity",
-          "type": "github_releases"
-        }
-      ]
-    },
-    "blender": {
-      "category": "graphics",
-      "homepage": "https://www.blender.org/",
-      "name": "Blender",
-      "sources": [
-        {
-          "parser": "html_page",
-          "priority": 1,
-          "type": "html_page",
-          "url": "https://www.blender.org/download/releases/"
-        }
-      ]
-    },
-    "chromium": {
-      "category": "browser",
-      "homepage": "https://www.chromium.org/",
-      "name": "Chromium",
-      "sources": [
-        {
-          "priority": 1,
-          "project": "chromium/chromium",
-          "type": "releasebot"
-        }
-      ]
-    },
-    "darktable": {
-      "category": "graphics",
-      "homepage": "https://www.darktable.org/",
-      "name": "darktable",
-      "sources": [
-        {
-          "priority": 1,
-          "repo": "darktable-org/darktable",
-          "type": "github_releases"
-        }
-      ]
+  
+  "custom": {
+    "xnviewmp": {
+      "url": "https://www.xnview.com/mantisbt/changelog_page.php",
+      "parser": "mantisbt"
     },
     "eidklient": {
-      "aur_package": "eidklient",
-      "category": "security",
-      "homepage": "https://eidas.minv.sk/",
-      "name": "eID Klient",
-      "sources": [
-        {
-          "config": {
-            "separator": "---",
-            "version_pattern": "Version\\s+(\\d+\\.\\d+\\.\\d+)"
-          },
-          "parser": "plain_text",
-          "priority": 1,
-          "type": "text_file",
-          "url": "https://eidas.minv.sk/downloadservice/eidklient/linux/eID_klient_release_notes.txt"
-        }
-      ]
-    },
-    "element-desktop": {
-      "name": "element-desktop",
-      "sources": [
-        {
-          "priority": 1,
-          "repo": "element-hq/element-web/",
-          "type": "github_releases"
-        }
-      ]
-    },
-    "firefox": {
-      "category": "browser",
-      "homepage": "https://www.mozilla.org/firefox/",
-      "name": "Mozilla Firefox",
-      "sources": [
-        {
-          "parser": "mozilla",
-          "priority": 1,
-          "type": "mozilla_releases",
-          "url": "https://www.mozilla.org/en-US/firefox/releases/"
-        }
-      ]
-    },
-    "gimp": {
-      "category": "graphics",
-      "homepage": "https://www.gimp.org/",
-      "name": "GIMP",
-      "sources": [
-        {
-          "parser": "gimp",
-          "priority": 1,
-          "type": "html_page",
-          "url": "https://www.gimp.org/release-notes/"
-        }
-      ]
-    },
-    "gramps": {
-      "name": "gramps",
-      "sources": [
-        {
-          "priority": 1,
-          "repo": "gramps-project/gramps",
-          "type": "github_releases"
-        }
-      ]
-    },
-    "handbrake": {
-      "category": "multimedia",
-      "homepage": "https://handbrake.fr/",
-      "name": "HandBrake",
-      "sources": [
-        {
-          "priority": 1,
-          "repo": "HandBrake/HandBrake",
-          "type": "github_releases"
-        }
-      ]
-    },
-    "inkscape": {
-      "category": "graphics",
-      "homepage": "https://inkscape.org/",
-      "name": "Inkscape",
-      "sources": [
-        {
-          "parser": "html_page",
-          "priority": 1,
-          "type": "html_page",
-          "url": "https://inkscape.org/release/"
-        }
-      ]
-    },
-    "kdenlive": {
-      "category": "multimedia",
-      "homepage": "https://kdenlive.org/",
-      "name": "Kdenlive",
-      "sources": [
-        {
-          "host": "invent.kde.org",
-          "priority": 1,
-          "repo": "multimedia/kdenlive",
-          "type": "gitlab_releases"
-        }
-      ]
-    },
-    "keepassxc": {
-      "category": "security",
-      "homepage": "https://keepassxc.org/",
-      "name": "KeePassXC",
-      "sources": [
-        {
-          "priority": 1,
-          "repo": "keepassxreboot/keepassxc",
-          "type": "github_releases"
-        }
-      ]
-    },
-    "krita": {
-      "category": "graphics",
-      "homepage": "https://krita.org/",
-      "name": "Krita",
-      "sources": [
-        {
-          "parser": "html_page",
-          "priority": 1,
-          "type": "html_page",
-          "url": "https://krita.org/en/release-notes/"
-        }
-      ]
-    },
-    "libreoffice-fresh": {
-      "category": "office",
-      "homepage": "https://www.libreoffice.org/",
-      "name": "LibreOffice Fresh",
-      "sources": [
-        {
-          "parser": "mediawiki",
-          "priority": 1,
-          "type": "html_page",
-          "url": "https://wiki.documentfoundation.org/ReleaseNotes/"
-        }
-      ]
-    },
-    "libreoffice-still": {
-      "category": "office",
-      "homepage": "https://www.libreoffice.org/",
-      "name": "LibreOffice Still",
-      "sources": [
-        {
-          "parser": "mediawiki",
-          "priority": 1,
-          "type": "html_page",
-          "url": "https://wiki.documentfoundation.org/ReleaseNotes/"
-        }
-      ]
-    },
-    "obs-studio": {
-      "category": "multimedia",
-      "homepage": "https://obsproject.com/",
-      "name": "OBS Studio",
-      "sources": [
-        {
-          "priority": 1,
-          "repo": "obsproject/obs-studio",
-          "type": "github_releases"
-        }
-      ]
-    },
-    "thunderbird": {
-      "category": "communication",
-      "homepage": "https://www.thunderbird.net/",
-      "name": "Mozilla Thunderbird",
-      "sources": [
-        {
-          "parser": "mozilla",
-          "priority": 1,
-          "type": "mozilla_releases",
-          "url": "https://www.thunderbird.net/en-US/thunderbird/releases/"
-        }
-      ]
-    },
-    "vlc": {
-      "category": "multimedia",
-      "homepage": "https://www.videolan.org/",
-      "name": "VLC Media Player",
-      "sources": [
-        {
-          "parser": "videolan",
-          "priority": 1,
-          "type": "html_page",
-          "url": "https://www.videolan.org/vlc/releases/"
-        },
-        {
-          "priority": 2,
-          "repo": "videolan/vlc",
-          "type": "github_releases"
-        }
-      ]
-    },
-    "xnviewmp": {
-      "arch_packages": [
-        "xnviewmp"
-      ],
-      "aur_packages": [
-        "xnviewmp",
-        "xnview-mp"
-      ],
-      "category": "graphics",
-      "homepage": "https://www.xnview.com/",
-      "name": "XnView MP",
-      "sources": [
-        {
-          "parser": "mantisbt_changelog",
-          "priority": 1,
-          "type": "custom_parser",
-          "url": "https://www.xnview.com/mantisbt/changelog_page.php"
-        }
-      ]
+      "url": "https://eidas.minv.sk/downloadservice/eidklient/linux/eID_klient_release_notes.txt",
+      "parser": "text_file"
     }
   },
-  "parsers": {
-    "custom_parser": {
-      "description": "Custom parser for specific sites",
-      "requires": [
-        "url",
-        "parser"
-      ]
-    },
-    "github_releases": {
-      "description": "GitHub Releases API",
-      "requires": [
-        "repo"
-      ]
-    },
-    "gitlab_releases": {
-      "description": "GitLab Releases API",
-      "requires": [
-        "host",
-        "repo"
-      ]
-    },
-    "html_page": {
-      "description": "HTML release notes page",
-      "optional": [
-        "parser"
-      ],
-      "requires": [
-        "url"
-      ]
-    },
-    "mozilla_releases": {
-      "description": "Mozilla-style release notes (Firefox, Thunderbird)",
-      "requires": [
-        "url"
-      ]
-    },
-    "releasebot": {
-      "description": "ReleaseBot.io tracking",
-      "requires": [
-        "project"
-      ]
-    },
-    "text_file": {
-      "description": "Plain text changelog file",
-      "optional": [
-        "config"
-      ],
-      "requires": [
-        "url"
-      ]
-    }
-  },
-
-  "total_packages": 20,
-  "version": "1.1"
+  
+  "releasebot": [
+    "firefox",
+    "chromium"
+  ]
 }
