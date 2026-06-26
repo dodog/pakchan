@@ -47,6 +47,7 @@
     "steam":            "ValveSoftware/steam-for-linux",
     "telegram-desktop": "telegramdesktop/tdesktop",
     "signal-desktop":   "signalapp/Signal-Desktop",
+    "downgrade":   "archlinux-downgrade/downgrade",
     "gramps":           "gramps-project/gramps"
   },
 
