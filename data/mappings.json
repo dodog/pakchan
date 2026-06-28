@@ -88,6 +88,7 @@
     "vlc": "https://www.videolan.org/vlc/releases/",     
     "code": "https://code.visualstudio.com/updates",     
     "scribus": "https://bugs.scribus.net/changelog_page.php",  
+    "wine": "https://www.winehq.org/news/",  
     "docker-desktop":    "https://docs.docker.com/desktop/release-notes/"
   },
 
