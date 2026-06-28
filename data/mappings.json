@@ -61,7 +61,7 @@
     "inkscape":  { "host": "gitlab.com",        "repo": "inkscape/inkscape"  },
     "gthumb":    { "host": "gitlab.gnome.org",   "repo": "GNOME/gthumb"       },
     "rhythmbox": { "host": "gitlab.gnome.org",   "repo": "GNOME/rhythmbox"    },
-     "rhythmbox": { "host": "gitlab.com",   "repo": "wireshark/wireshark"    },
+     "wireshark": { "host": "gitlab.com",   "repo": "wireshark/wireshark"    },
     "gnome-control-center":    { "host": "gitlab.gnome.org",   "repo": "GNOME/gnome-control-center"       },
     "digikam":   { "host": "invent.kde.org",     "repo": "graphics/digikam"   },
     "gwenview":  { "host": "invent.kde.org",     "repo": "graphics/gwenview"  },
