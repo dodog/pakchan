@@ -28,7 +28,6 @@
     "qbittorrent":      "qbittorrent/qBittorrent",
     "transmission-gtk": "transmission/transmission",
     "transmission-qt":  "transmission/transmission",
-    "wireshark-qt":     "wireshark/wireshark",
     "audacity":         "audacity/audacity",
     "calibre":          "kovidgoyal/calibre",
     "pinta":            "PintaProject/Pinta",
