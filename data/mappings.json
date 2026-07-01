@@ -102,8 +102,7 @@
       "url":    "https://bugs.scribus.net/changelog_page.php",
       "parser": "mantisbt"
     },
-
-       "electrum": {
+    "electrum": {
       "url":    "https://github.com/spesmilo/electrum/blob/master/RELEASE-NOTES",
       "parser": "text_file"
     },
