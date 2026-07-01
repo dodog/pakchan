@@ -53,6 +53,7 @@
        "flameshot":   "flameshot-org/flameshot",
       "qbittorrent":   "qbittorrent/qBittorrent/",
    "monero-gui": "monero-project/monero-gui",
+       "qbittorrent": "qbittorrent/qBittorrent",
     "gramps":           "gramps-project/gramps"
   },
 
