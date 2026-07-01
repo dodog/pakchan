@@ -54,6 +54,7 @@
       "qbittorrent":   "qbittorrent/qBittorrent/",
    "monero-gui": "monero-project/monero-gui",
        "qbittorrent": "qbittorrent/qBittorrent",
+           "less": "gwsw/less",
     "gramps":           "gramps-project/gramps"
   },
 
