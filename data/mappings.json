@@ -52,7 +52,7 @@
    "element-web":   "element-hq/element-web",
        "flameshot":   "flameshot-org/flameshot",
       "qbittorrent":   "qbittorrent/qBittorrent/",
-   
+   "monero-gui": "monero-project/monero-gui",
     "gramps":           "gramps-project/gramps"
   },
 
