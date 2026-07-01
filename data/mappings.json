@@ -35,13 +35,11 @@
     "darktable":        "darktable-org/darktable",
     "mpv":              "mpv-player/mpv",
     "ffmpeg":           "FFmpeg/FFmpeg",
-    "vlc":              "videolan/vlc",
     "shotcut":          "mltframework/shotcut",
     "kdenlive":         "KDE/kdenlive",
     "nodejs":           "nodejs/node",
     "go":               "golang/go",
     "rust":             "rust-lang/rust",
-    "docker":           "moby/moby",
     "podman":           "containers/podman",
     "steam":            "ValveSoftware/steam-for-linux",
     "telegram-desktop": "telegramdesktop/tdesktop",
@@ -99,7 +97,12 @@
     "xnviewmp": {
       "url":    "https://www.xnview.com/mantisbt/changelog_page.php",
       "parser": "mantisbt"
+    },    
+    "scribus": {
+      "url":    "https://bugs.scribus.net/changelog_page.php",
+      "parser": "mantisbt"
     },
+    
     "eidklient": {
       "url":    "https://eidas.minv.sk/downloadservice/eidklient/linux/eID_klient_release_notes.txt",
       "parser": "text_file"
