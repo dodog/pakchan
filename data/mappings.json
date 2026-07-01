@@ -102,7 +102,12 @@
       "url":    "https://bugs.scribus.net/changelog_page.php",
       "parser": "mantisbt"
     },
-    
+
+       "electrum": {
+      "url":    "https://github.com/spesmilo/electrum/blob/master/RELEASE-NOTES",
+      "parser": "text_file"
+    },
+ 
     "eidklient": {
       "url":    "https://eidas.minv.sk/downloadservice/eidklient/linux/eID_klient_release_notes.txt",
       "parser": "text_file"
