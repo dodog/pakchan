@@ -6,6 +6,7 @@
     "obs-studio":       "obsproject/obs-studio",
     "handbrake":        "HandBrake/HandBrake",
     "doublecmd":        "doublecmd/doublecmd",
+    "doublecmd-qt":     "doublecmd/doublecmd",
     "pcmanfm":          "lxde/pcmanfm",
     "thunar":           "xfce/thunar",
     "alacritty":        "alacritty/alacritty",
@@ -44,15 +45,18 @@
     "steam":            "ValveSoftware/steam-for-linux",
     "telegram-desktop": "telegramdesktop/tdesktop",
     "signal-desktop":   "signalapp/Signal-Desktop",
-    "downgrade":   "archlinux-downgrade/downgrade",
-    "aegisub":   "TypesettingTools/Aegisub",
-    "element-desktop":   "element-hq/element-web",
-   "element-web":   "element-hq/element-web",
-       "flameshot":   "flameshot-org/flameshot",
-      "qbittorrent":   "qbittorrent/qBittorrent/",
-   "monero-gui": "monero-project/monero-gui",
-       "qbittorrent": "qbittorrent/qBittorrent",
-           "less": "gwsw/less",
+    "downgrade":        "archlinux-downgrade/downgrade",
+    "aegisub":          "TypesettingTools/Aegisub",
+    "element-desktop":  "element-hq/element-web",
+    "element-web":      "element-hq/element-web",
+    "flameshot":        "flameshot-org/flameshot",
+    "qbittorrent":      "qbittorrent/qBittorrent/",
+    "monero-gui":       "monero-project/monero-gui",
+    "qbittorrent":      "qbittorrent/qBittorrent",
+    "less":             "gwsw/less",
+    "gsmartcontrol":    "ashaduri/gsmartcontrol",  
+    "onionshare":       "onionshare/onionshare", 
+    "poedit":           "vslavik/poedit", 
     "gramps":           "gramps-project/gramps"
   },
 
@@ -60,6 +64,7 @@
     "inkscape":  { "host": "gitlab.com",        "repo": "inkscape/inkscape"  },
     "gthumb":    { "host": "gitlab.gnome.org",   "repo": "GNOME/gthumb"       },
     "rhythmbox": { "host": "gitlab.gnome.org",   "repo": "GNOME/rhythmbox"    },
+    "rhythmbox": { "host": "gitlab.gnome.org",   "repo": "GNOME/gparted"    },
     "wireshark": { "host": "gitlab.com",   "repo": "wireshark/wireshark"    },
     "gnome-control-center":    { "host": "gitlab.gnome.org",   "repo": "GNOME/gnome-control-center"       },
     "orca":    { "host": "gitlab.gnome.org",   "repo": "GNOME/orca"       },
@@ -90,6 +95,7 @@
     "code": "https://code.visualstudio.com/updates",     
     "scribus": "https://bugs.scribus.net/changelog_page.php",  
     "wine": "https://www.winehq.org/news/",  
+    "grsync": "https://www.opbyte.it/grsync/changes.html",  
     "docker-desktop":    "https://docs.docker.com/desktop/release-notes/"
   },
 
@@ -106,7 +112,10 @@
       "url":    "https://github.com/spesmilo/electrum/blob/master/RELEASE-NOTES",
       "parser": "text_file"
     },
- 
+     "gpsd": {
+      "url":    "https://gpsd.gitlab.io/gpsd/NEWS",
+      "parser": "text_file"
+    },
     "eidklient": {
       "url":    "https://eidas.minv.sk/downloadservice/eidklient/linux/eID_klient_release_notes.txt",
       "parser": "text_file"
