@@ -55,6 +55,7 @@
     "qbittorrent":      "qbittorrent/qBittorrent",
     "less":             "gwsw/less",
     "gsmartcontrol":    "ashaduri/gsmartcontrol",  
+    "webcamoid":        "webcamoid/webcamoid",     
     "onionshare":       "onionshare/onionshare", 
     "poedit":           "vslavik/poedit", 
     "gramps":           "gramps-project/gramps"
