@@ -60,7 +60,9 @@
     "poedit":           "vslavik/poedit", 
     "syncthing":        "syncthing/syncthing", 
     "containerd":       "containerd/containerd", 
+    "openvpn":          "OpenVPN/openvpn", 
     "7zip":             "ip7z/7zip/", 
+    "bazaar":             "bazaar-org/bazaar", 
     "gramps":           "gramps-project/gramps"
   },
 
@@ -103,6 +105,8 @@
     "grsync": "https://www.opbyte.it/grsync/changes.html",  
     "nano": "https://www.nano-editor.org/news.php",  
     "samba": "https://www.samba.org/samba/history/", 
+    "php": "hhttps://www.php.net/ChangeLog-8.php/", 
+    
     "docker-desktop":    "https://docs.docker.com/desktop/release-notes/"
   },
 
