@@ -61,8 +61,8 @@
     "syncthing":        "syncthing/syncthing", 
     "containerd":       "containerd/containerd", 
     "openvpn":          "OpenVPN/openvpn", 
-    "7zip":             "ip7z/7zip/", 
-    "bazaar":             "bazaar-org/bazaar", 
+    "7zip":             "ip7z/7zip", 
+    "bazaar":           "bazaar-org/bazaar", 
     "gramps":           "gramps-project/gramps"
   },
 
