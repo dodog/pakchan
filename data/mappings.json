@@ -50,9 +50,8 @@
     "element-desktop":  "element-hq/element-web",
     "element-web":      "element-hq/element-web",
     "flameshot":        "flameshot-org/flameshot",
-    "qbittorrent":      "qbittorrent/qBittorrent/",
-    "monero-gui":       "monero-project/monero-gui",
     "qbittorrent":      "qbittorrent/qBittorrent",
+    "monero-gui":       "monero-project/monero-gui",
     "less":             "gwsw/less",
     "gsmartcontrol":    "ashaduri/gsmartcontrol",  
     "webcamoid":        "webcamoid/webcamoid",     
@@ -120,7 +119,7 @@
       "parser": "mantisbt"
     },
     "electrum": {
-      "url":    "https://github.com/spesmilo/electrum/blob/master/RELEASE-NOTES",
+      "url":    "https://raw.githubusercontent.com/spesmilo/electrum/refs/heads/master/RELEASE-NOTES",
       "parser": "text_file"
     },
      "gpsd": {
