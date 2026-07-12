@@ -100,7 +100,6 @@
     "chromium":          "https://chromereleases.googleblog.com/search/label/Stable%20updates",
     "keepass":           "https://keepass.info/news/news_all.html",
     "virtualbox":        "https://www.virtualbox.org/wiki/Changelog",
-    "electrum": "https://github.com/spesmilo/electrum/blob/master/RELEASE-NOTES",
     "vlc": "https://www.videolan.org/vlc/releases/",     
     "code": "https://code.visualstudio.com/updates",     
     "scribus": "https://bugs.scribus.net/changelog_page.php",  
