@@ -65,6 +65,7 @@
     "cardpeek":         "L1L1/cardpeek",     
     "rapid-photo-downloader":         "damonlynch/rapid-photo-downloader",    
     "sudo":             "sudo-project/sudo",   
+    "gdm-settings":     "gdm-settings/gdm-settings",   
     "gramps":           "gramps-project/gramps"
   },
 
