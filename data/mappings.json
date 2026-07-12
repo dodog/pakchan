@@ -1,141 +1,193 @@
 {
   "_comment": "Pakku / Pakchan upstream changelog mappings. Edit this file to add entries.",
   "_version": 3,
-
-  "github": {
-    "obs-studio":       "obsproject/obs-studio",
-    "handbrake":        "HandBrake/HandBrake",
-    "doublecmd":        "doublecmd/doublecmd",
-    "doublecmd-qt":     "doublecmd/doublecmd",
-    "pcmanfm":          "lxde/pcmanfm",
-    "thunar":           "xfce/thunar",
-    "alacritty":        "alacritty/alacritty",
-    "kitty":            "kovidgoyal/kitty",
-    "htop":             "htop-dev/htop",
-    "btop":             "aristocratos/btop",
-    "neofetch":         "dylanaraps/neofetch",
-    "fastfetch":        "fastfetch-cli/fastfetch",
-    "zulucrypt":        "mhogomchungu/zuluCrypt",
-    "zulumount":        "mhogomchungu/zuluCrypt",
-    "keepassxc":        "keepassxc/keepassxc",
-    "bitwarden":        "bitwarden/clients",
-    "veracrypt":        "veracrypt/VeraCrypt",
-    "vscodium":         "VSCodium/vscodium",
-    "vim":              "vim/vim",
-    "neovim":           "neovim/neovim",
-    "helix":            "helix-editor/helix",
-    "curl":             "curl/curl",
-    "aria2":            "aria2/aria2",
-    "qbittorrent":      "qbittorrent/qBittorrent",
-    "transmission-gtk": "transmission/transmission",
-    "transmission-qt":  "transmission/transmission",
-    "audacity":         "audacity/audacity",
-    "calibre":          "kovidgoyal/calibre",
-    "pinta":            "PintaProject/Pinta",
-    "rawtherapee":      "Beep6581/RawTherapee",
-    "darktable":        "darktable-org/darktable",
-    "mpv":              "mpv-player/mpv",
-    "ffmpeg":           "FFmpeg/FFmpeg",
-    "shotcut":          "mltframework/shotcut",
-    "kdenlive":         "KDE/kdenlive",
-    "nodejs":           "nodejs/node",
-    "go":               "golang/go",
-    "rust":             "rust-lang/rust",
-    "podman":           "containers/podman",
-    "steam":            "ValveSoftware/steam-for-linux",
-    "telegram-desktop": "telegramdesktop/tdesktop",
-    "signal-desktop":   "signalapp/Signal-Desktop",
-    "downgrade":        "archlinux-downgrade/downgrade",
-    "aegisub":          "TypesettingTools/Aegisub",
-    "element-desktop":  "element-hq/element-web",
-    "element-web":      "element-hq/element-web",
-    "flameshot":        "flameshot-org/flameshot",
-    "qbittorrent":      "qbittorrent/qBittorrent",
-    "monero-gui":       "monero-project/monero-gui",
-    "less":             "gwsw/less",
-    "gsmartcontrol":    "ashaduri/gsmartcontrol",  
-    "webcamoid":        "webcamoid/webcamoid",     
-    "onionshare":       "onionshare/onionshare", 
-    "poedit":           "vslavik/poedit", 
-    "syncthing":        "syncthing/syncthing", 
-    "containerd":       "containerd/containerd", 
-    "openvpn":          "OpenVPN/openvpn", 
-    "7zip":             "ip7z/7zip", 
-    "bazaar":           "bazaar-org/bazaar", 
-    "cardpeek":         "L1L1/cardpeek",     
-    "rapid-photo-downloader":         "damonlynch/rapid-photo-downloader",    
-    "sudo":             "sudo-project/sudo",   
-    "gdm-settings":     "gdm-settings/gdm-settings",   
-    "gramps":           "gramps-project/gramps"
-  },
-
-  "gitlab": {
-    "inkscape":  { "host": "gitlab.com",        "repo": "inkscape/inkscape"  },
-    "gthumb":    { "host": "gitlab.gnome.org",   "repo": "GNOME/gthumb"       },
-    "rhythmbox": { "host": "gitlab.gnome.org",   "repo": "GNOME/rhythmbox"    },
-    "gparted":   { "host": "gitlab.gnome.org",   "repo": "GNOME/gparted"    },
-    "wireshark": { "host": "gitlab.com",   "repo": "wireshark/wireshark"    },
-    "gnome-control-center":    { "host": "gitlab.gnome.org",   "repo": "GNOME/gnome-control-center"       },
-    "orca":      { "host": "gitlab.gnome.org",   "repo": "GNOME/orca"       },
-    "wine-mono":      { "host": "gitlab.winehq.org",   "repo": "mono/wine-mono"     },
-    "wine":      { "host": "gitlab.winehq.org",   "repo": "/wine/wine"     },
-    "digikam":   { "host": "invent.kde.org",     "repo": "graphics/digikam"   },
-    "gwenview":  { "host": "invent.kde.org",     "repo": "graphics/gwenview"  },
-    "dolphin":   { "host": "invent.kde.org",     "repo": "system/dolphin"     },
-    "konsole":   { "host": "invent.kde.org",     "repo": "utilities/konsole"  },
-    "okular":    { "host": "invent.kde.org",     "repo": "graphics/okular"    },
-    "spectacle": { "host": "invent.kde.org",     "repo": "graphics/spectacle" }
-  },
-
-  "release_pages": {
-    "firefox":           "https://www.mozilla.org/en-US/firefox/releases/",
-    "firefox-esr":       "https://www.mozilla.org/en-US/firefox/releases/",
-    "thunderbird":       "https://www.thunderbird.net/en-US/thunderbird/releases/",
-    "filezilla":         "https://filezilla-project.org/versions.php",
-    "krita":             "https://krita.org/en/release-notes/",
-    "gimp":              "https://www.gimp.org/release-notes/",
-    "libreoffice-still": "https://www.libreoffice.org/release-notes/",
-    "libreoffice-fresh": "https://www.libreoffice.org/release-notes/",
-    "blender":           "https://www.blender.org/download/releases/",
-    "python":            "https://docs.python.org/3/whatsnew/",
-    "chromium":          "https://chromereleases.googleblog.com/search/label/Stable%20updates",
-    "keepass":           "https://keepass.info/news/news_all.html",
-    "virtualbox":        "https://www.virtualbox.org/wiki/Changelog",
-    "vlc": "https://www.videolan.org/vlc/releases/",     
-    "code": "https://code.visualstudio.com/updates",     
-    "scribus": "https://bugs.scribus.net/changelog_page.php",  
-    "grsync": "https://www.opbyte.it/grsync/changes.html",  
-    "nano": "https://www.nano-editor.org/news.php",  
-    "samba": "https://www.samba.org/samba/history/", 
-    "php": "https://www.php.net/ChangeLog-8.php/", 
-    "tellico": "https://tellico-project.org/tellico-changelog/",     
-    "docker-desktop":    "https://docs.docker.com/desktop/release-notes/"
-  },
-
   "custom": {
-    "xnviewmp": {
-      "url":    "https://www.xnview.com/mantisbt/changelog_page.php",
-      "parser": "mantisbt"
-    },    
-    "scribus": {
-      "url":    "https://bugs.scribus.net/changelog_page.php",
-      "parser": "mantisbt"
+    "eidklient": {
+      "parser": "text_file",
+      "url": "https://eidas.minv.sk/downloadservice/eidklient/linux/eID_klient_release_notes.txt"
     },
     "electrum": {
-      "url":    "https://raw.githubusercontent.com/spesmilo/electrum/refs/heads/master/RELEASE-NOTES",
-      "parser": "text_file"
+      "parser": "text_file",
+      "url": "https://raw.githubusercontent.com/spesmilo/electrum/refs/heads/master/RELEASE-NOTES"
     },
-     "gpsd": {
-      "url":    "https://gpsd.gitlab.io/gpsd/NEWS",
-      "parser": "text_file"
+    "gpsd": {
+      "parser": "text_file",
+      "url": "https://gpsd.gitlab.io/gpsd/NEWS"
     },
-     "mkvtoolnix-gui": {
-      "url":    "https://codeberg.org/mbunkus/mkvtoolnix/raw/branch/main/NEWS.md",
-      "parser": "text_file"
+    "mkvtoolnix-gui": {
+      "parser": "text_file",
+      "url": "https://codeberg.org/mbunkus/mkvtoolnix/raw/branch/main/NEWS.md"
     },
-    "eidklient": {
-      "url":    "https://eidas.minv.sk/downloadservice/eidklient/linux/eID_klient_release_notes.txt",
-      "parser": "text_file"
+    "scribus": {
+      "parser": "mantisbt",
+      "url": "https://bugs.scribus.net/changelog_page.php"
+    },
+    "xnviewmp": {
+      "parser": "mantisbt",
+      "url": "https://www.xnview.com/mantisbt/changelog_page.php"
     }
-  }
+  },
+  "github": {
+    "7zip": "ip7z/7zip",
+    "aegisub": "TypesettingTools/Aegisub",
+    "alacritty": "alacritty/alacritty",
+    "aria2": "aria2/aria2",
+    "audacity": "audacity/audacity",
+    "bazaar": "bazaar-org/bazaar",
+    "bitwarden": "bitwarden/clients",
+    "btop": "aristocratos/btop",
+    "calibre": "kovidgoyal/calibre",
+    "cardpeek": "L1L1/cardpeek",
+    "containerd": "containerd/containerd",
+    "curl": "curl/curl",
+    "darktable": "darktable-org/darktable",
+    "doublecmd": "doublecmd/doublecmd",
+    "doublecmd-qt": "doublecmd/doublecmd",
+    "downgrade": "archlinux-downgrade/downgrade",
+    "element-desktop": "element-hq/element-web",
+    "element-web": "element-hq/element-web",
+    "fastfetch": "fastfetch-cli/fastfetch",
+    "ffmpeg": "FFmpeg/FFmpeg",
+    "flameshot": "flameshot-org/flameshot",
+    "gdm-settings": "gdm-settings/gdm-settings",
+    "go": "golang/go",
+    "gramps": "gramps-project/gramps",
+    "gsmartcontrol": "ashaduri/gsmartcontrol",
+    "handbrake": "HandBrake/HandBrake",
+    "helix": "helix-editor/helix",
+    "htop": "htop-dev/htop",
+    "kdenlive": "KDE/kdenlive",
+    "keepassxc": "keepassxc/keepassxc",
+    "kitty": "kovidgoyal/kitty",
+    "less": "gwsw/less",
+    "monero-gui": "monero-project/monero-gui",
+    "mpv": "mpv-player/mpv",
+    "neofetch": "dylanaraps/neofetch",
+    "neovim": "neovim/neovim",
+    "nodejs": "nodejs/node",
+    "obs-studio": "obsproject/obs-studio",
+    "onionshare": "onionshare/onionshare",
+    "openvpn": "OpenVPN/openvpn",
+    "pcmanfm": "lxde/pcmanfm",
+    "pinta": "PintaProject/Pinta",
+    "podman": "containers/podman",
+    "poedit": "vslavik/poedit",
+    "qbittorrent": "qbittorrent/qBittorrent",
+    "rapid-photo-downloader": "damonlynch/rapid-photo-downloader",
+    "rawtherapee": "Beep6581/RawTherapee",
+    "rust": "rust-lang/rust",
+    "shotcut": "mltframework/shotcut",
+    "signal-desktop": "signalapp/Signal-Desktop",
+    "steam": "ValveSoftware/steam-for-linux",
+    "sudo": "sudo-project/sudo",
+    "syncthing": "syncthing/syncthing",
+    "telegram-desktop": "telegramdesktop/tdesktop",
+    "thunar": "xfce/thunar",
+    "transmission-gtk": "transmission/transmission",
+    "transmission-qt": "transmission/transmission",
+    "veracrypt": "veracrypt/VeraCrypt",
+    "vim": "vim/vim",
+    "vscodium": "VSCodium/vscodium",
+    "webcamoid": "webcamoid/webcamoid",
+    "zulucrypt": "mhogomchungu/zuluCrypt",
+    "zulumount": "mhogomchungu/zuluCrypt"
+  },
+  "gitlab": {
+    "digikam": {
+      "host": "invent.kde.org",
+      "repo": "graphics/digikam"
+    },
+    "dolphin": {
+      "host": "invent.kde.org",
+      "repo": "system/dolphin"
+    },
+    "gnome-control-center": {
+      "host": "gitlab.gnome.org",
+      "repo": "GNOME/gnome-control-center"
+    },
+    "gparted": {
+      "host": "gitlab.gnome.org",
+      "repo": "GNOME/gparted"
+    },
+    "gthumb": {
+      "host": "gitlab.gnome.org",
+      "repo": "GNOME/gthumb"
+    },
+    "gwenview": {
+      "host": "invent.kde.org",
+      "repo": "graphics/gwenview"
+    },
+    "inkscape": {
+      "host": "gitlab.com",
+      "repo": "inkscape/inkscape"
+    },
+    "konsole": {
+      "host": "invent.kde.org",
+      "repo": "utilities/konsole"
+    },
+    "okular": {
+      "host": "invent.kde.org",
+      "repo": "graphics/okular"
+    },
+    "orca": {
+      "host": "gitlab.gnome.org",
+      "repo": "GNOME/orca"
+    },
+    "rhythmbox": {
+      "host": "gitlab.gnome.org",
+      "repo": "GNOME/rhythmbox"
+    },
+    "spectacle": {
+      "host": "invent.kde.org",
+      "repo": "graphics/spectacle"
+    },
+    "wine": {
+      "host": "gitlab.winehq.org",
+      "repo": "/wine/wine"
+    },
+    "wine-mono": {
+      "host": "gitlab.winehq.org",
+      "repo": "mono/wine-mono"
+    },
+    "wireshark": {
+      "host": "gitlab.com",
+      "repo": "wireshark/wireshark"
+    }
+  },
+  "packages": {
+    "git": {
+      "name": "git",
+      "sources": [
+        {
+          "repo": "git/git",
+          "type": "github_releases"
+        }
+      ]
+    }
+  },
+  "release_pages": {
+    "blender": "https://www.blender.org/download/releases/",
+    "chromium": "https://chromereleases.googleblog.com/search/label/Stable%20updates",
+    "code": "https://code.visualstudio.com/updates",
+    "docker-desktop": "https://docs.docker.com/desktop/release-notes/",
+    "filezilla": "https://filezilla-project.org/versions.php",
+    "firefox": "https://www.mozilla.org/en-US/firefox/releases/",
+    "firefox-esr": "https://www.mozilla.org/en-US/firefox/releases/",
+    "gimp": "https://www.gimp.org/release-notes/",
+    "grsync": "https://www.opbyte.it/grsync/changes.html",
+    "keepass": "https://keepass.info/news/news_all.html",
+    "krita": "https://krita.org/en/release-notes/",
+    "libreoffice-fresh": "https://www.libreoffice.org/release-notes/",
+    "libreoffice-still": "https://www.libreoffice.org/release-notes/",
+    "nano": "https://www.nano-editor.org/news.php",
+    "php": "https://www.php.net/ChangeLog-8.php/",
+    "python": "https://docs.python.org/3/whatsnew/",
+    "samba": "https://www.samba.org/samba/history/",
+    "scribus": "https://bugs.scribus.net/changelog_page.php",
+    "tellico": "https://tellico-project.org/tellico-changelog/",
+    "thunderbird": "https://www.thunderbird.net/en-US/thunderbird/releases/",
+    "virtualbox": "https://www.virtualbox.org/wiki/Changelog",
+    "vlc": "https://www.videolan.org/vlc/releases/"
+  },
+  "total_packages": 1
 }
