@@ -62,6 +62,9 @@
     "openvpn":          "OpenVPN/openvpn", 
     "7zip":             "ip7z/7zip", 
     "bazaar":           "bazaar-org/bazaar", 
+    "cardpeek":         "L1L1/cardpeek",     
+    "rapid-photo-downloader":         "damonlynch/rapid-photo-downloader",    
+    "sudo":             "sudo-project/sudo",   
     "gramps":           "gramps-project/gramps"
   },
 
@@ -104,8 +107,8 @@
     "grsync": "https://www.opbyte.it/grsync/changes.html",  
     "nano": "https://www.nano-editor.org/news.php",  
     "samba": "https://www.samba.org/samba/history/", 
-    "php": "hhttps://www.php.net/ChangeLog-8.php/", 
-    
+    "php": "https://www.php.net/ChangeLog-8.php/", 
+    "tellico": "https://tellico-project.org/tellico-changelog/",     
     "docker-desktop":    "https://docs.docker.com/desktop/release-notes/"
   },
 
@@ -124,6 +127,10 @@
     },
      "gpsd": {
       "url":    "https://gpsd.gitlab.io/gpsd/NEWS",
+      "parser": "text_file"
+    },
+     "mkvtoolnix": {
+      "url":    "https://codeberg.org/mbunkus/mkvtoolnix/raw/branch/main/NEWS.md",
       "parser": "text_file"
     },
     "eidklient": {
