@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -10,7 +11,7 @@
             padding: 0;
             box-sizing: border-box;
         }
-        
+
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: #0d1117;
@@ -20,29 +21,29 @@
             justify-content: center;
             padding: 20px;
         }
-        
+
         .container {
             max-width: 600px;
             width: 100%;
             margin-top: 40px;
         }
-        
+
         header {
             text-align: center;
             margin-bottom: 30px;
         }
-        
+
         header h1 {
             font-size: 1.8em;
             color: #58a6ff;
             margin-bottom: 8px;
         }
-        
+
         header p {
             color: #8b949e;
             font-size: 0.9em;
         }
-        
+
         .card {
             background: #161b22;
             border: 1px solid #30363d;
@@ -50,11 +51,11 @@
             padding: 20px;
             margin-bottom: 16px;
         }
-        
+
         .form-group {
             margin-bottom: 16px;
         }
-        
+
         label {
             display: block;
             font-size: 0.85em;
@@ -62,7 +63,7 @@
             color: #c9d1d9;
             margin-bottom: 6px;
         }
-        
+
         input[type="text"],
         input[type="url"],
         select {
@@ -75,14 +76,14 @@
             font-size: 14px;
             transition: border-color 0.2s;
         }
-        
+
         input:focus,
         select:focus {
             outline: none;
             border-color: #58a6ff;
             box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.1);
         }
-        
+
         select {
             cursor: pointer;
             appearance: none;
@@ -90,18 +91,18 @@
             background-repeat: no-repeat;
             background-position: right 10px center;
         }
-        
+
         .source-type-row {
             display: flex;
             gap: 10px;
             align-items: end;
         }
-        
+
         .source-type-row .form-group {
             flex: 1;
             margin-bottom: 0;
         }
-        
+
         .btn {
             padding: 8px 16px;
             border: 1px solid #30363d;
@@ -110,7 +111,7 @@
             font-size: 14px;
             transition: all 0.2s;
         }
-        
+
         .btn-primary {
             background: #238636;
             border-color: rgba(240, 246, 252, 0.1);
@@ -119,11 +120,11 @@
             padding: 10px;
             font-weight: 600;
         }
-        
+
         .btn-primary:hover {
             background: #2ea043;
         }
-        
+
         .btn-danger {
             background: transparent;
             color: #f85149;
@@ -131,18 +132,18 @@
             padding: 4px 10px;
             font-size: 12px;
         }
-        
+
         .btn-danger:hover {
             background: #f85149;
             color: white;
         }
-        
+
         .hint {
             font-size: 0.8em;
             color: #8b949e;
             margin-top: 4px;
         }
-        
+
         .success-message {
             background: #1b3424;
             border: 1px solid #238636;
@@ -151,7 +152,7 @@
             display: none;
             margin-bottom: 16px;
         }
-        
+
         .error-message {
             background: #341b1b;
             border: 1px solid #f85149;
@@ -160,14 +161,14 @@
             display: none;
             margin-bottom: 16px;
         }
-        
+
         .stats {
             text-align: center;
             font-size: 0.85em;
             color: #8b949e;
             margin-top: 20px;
         }
-        
+
         .stats span {
             color: #58a6ff;
             font-weight: 600;
@@ -208,6 +209,7 @@
         }
     </style>
 </head>
+
 <body>
     <div class="container">
 
@@ -222,26 +224,24 @@
 
 
 
-        
+
         <div class="success-message" id="successMessage">✓ Submitted! Redirecting to GitHub...</div>
         <div class="error-message" id="errorMessage"></div>
-        
+
         <form id="submitForm">
             <!-- Package Name -->
             <div class="card">
                 <div class="form-group">
                     <label>Package Name *</label>
-                    <input type="text" id="packageName" required 
-                           placeholder="e.g., firefox, vlc, eidklient, xnviewmp"
-                           autocomplete="off">
+                    <input type="text" id="packageName" required placeholder="e.g., firefox, vlc, eidklient, xnviewmp" autocomplete="off">
                     <div class="hint">Exact name as shown in pacman/AUR</div>
                 </div>
             </div>
-            
+
             <!-- Changelog Source -->
             <div class="card">
                 <label style="margin-bottom: 12px;">Changelog Source *</label>
-                
+
                 <div class="form-group">
                     <label style="font-weight: normal; color: #8b949e;">Source Type</label>
                     <select id="sourceType">
@@ -253,14 +253,14 @@
                         <option value="other">Other URL</option>
                     </select>
                 </div>
-                
+
                 <!-- GitHub -->
                 <div id="fieldGithub" class="form-group">
                     <label style="font-weight: normal; color: #8b949e;">Repository</label>
                     <input type="text" placeholder="owner/repo (e.g., videolan/vlc)">
                     <div class="hint">GitHub repository path</div>
                 </div>
-                
+
                 <!-- GitLab -->
                 <div id="fieldGitlab" class="form-group" style="display:none;">
                     <label style="font-weight: normal; color: #8b949e;">GitLab Host</label>
@@ -272,7 +272,7 @@
                     <input type="text" placeholder="group/project">
                     <div class="hint">Full repository path on GitLab</div>
                 </div>
-                
+
                 <!-- URL -->
                 <div id="fieldUrl" class="form-group" style="display:none;">
                     <label style="font-weight: normal; color: #8b949e;">URL</label>
@@ -280,15 +280,15 @@
                     <div class="hint">Direct link to changelog/release notes page</div>
                 </div>
             </div>
-            
+
             <button type="submit" class="btn btn-primary">Submit to GitHub →</button>
         </form>
-        
+
         <div class="stats">
             <span id="packageCount">...</span> packages mapped in the database
         </div>
     </div>
-    
+
     <script>
         // Show/hide fields based on source type
         document.getElementById('sourceType').addEventListener('change', function() {
@@ -296,10 +296,9 @@
             document.getElementById('fieldGithub').style.display = type === 'github_releases' ? 'block' : 'none';
             document.getElementById('fieldGitlab').style.display = type === 'gitlab_releases' ? 'block' : 'none';
             document.getElementById('fieldGitlabRepo').style.display = type === 'gitlab_releases' ? 'block' : 'none';
-            document.getElementById('fieldUrl').style.display = 
-                ['html_page', 'mozilla_releases', 'text_file', 'other'].includes(type) ? 'block' : 'none';
+            document.getElementById('fieldUrl').style.display = ['html_page', 'mozilla_releases', 'text_file', 'other'].includes(type) ? 'block' : 'none';
         });
-        
+
         // Load stats
         fetch('https://raw.githubusercontent.com/dodog/pakchan/main/data/mappings.json')
             .then(r => r.json())
@@ -313,25 +312,25 @@
         // Form submission with duplicate check
         document.getElementById('submitForm').addEventListener('submit', async function(e) {
             e.preventDefault();
-            
+
             const packageName = document.getElementById('packageName').value.trim().toLowerCase();
             const sourceType = document.getElementById('sourceType').value;
-            
+
             if (!packageName) {
                 showError('Please enter a package name');
                 return;
             }
-            
+
             // Check if package already exists in Pakchan
             try {
                 const response = await fetch('https://raw.githubusercontent.com/dodog/pakchan/main/data/mappings.json');
                 const data = await response.json();
                 const packages = data.packages || {};
-                
+
                 if (packages[packageName]) {
                     const existing = packages[packageName];
                     const sourceCount = existing.sources ? existing.sources.length : 0;
-                    
+
                     showError(
                         `⚠️ "${packageName}" already exists in the database with ${sourceCount} source(s).\n\n` +
                         `To update it, please create an issue manually:\n` +
@@ -343,28 +342,50 @@
                 // If we can't check, proceed anyway
                 console.warn('Could not check for duplicates:', err);
             }
-            
 
 
 
-            // Build the submission data in new simplified format
-            let jsonBlock = '';
+
+            // Build the submission source object in the expected format
+            let source = {};
             if (sourceType === 'github_releases') {
                 const repo = document.querySelector('#fieldGithub input').value.trim();
-                jsonBlock = `"github": {\n  "${packageName}": "${repo}"\n}`;
+                source = {
+                    type: 'github_releases',
+                    repo
+                };
             } else if (sourceType === 'gitlab_releases') {
                 const host = document.querySelector('#fieldGitlab input').value.trim();
                 const repo = document.querySelector('#fieldGitlabRepo input').value.trim();
-                jsonBlock = `"gitlab": {\n  "${packageName}": { "host": "${host}", "repo": "${repo}" }\n}`;
-            } else if (sourceType === 'html_page' || sourceType === 'mozilla_releases') {
+                source = {
+                    type: 'gitlab_releases',
+                    host,
+                    repo
+                };
+            } else if (sourceType === 'html_page') {
                 const url = document.querySelector('#fieldUrl input').value.trim();
-                jsonBlock = `"release_pages": {\n  "${packageName}": "${url}"\n}`;
+                source = {
+                    type: 'html_page',
+                    url
+                };
+            } else if (sourceType === 'mozilla_releases') {
+                const url = document.querySelector('#fieldUrl input').value.trim();
+                source = {
+                    type: 'mozilla_releases',
+                    url
+                };
             } else if (sourceType === 'text_file') {
                 const url = document.querySelector('#fieldUrl input').value.trim();
-                jsonBlock = `"custom": {\n  "${packageName}": { "url": "${url}", "parser": "text_file" }\n}`;
+                source = {
+                    type: 'text_file',
+                    url
+                };
             } else {
                 const url = document.querySelector('#fieldUrl input').value.trim();
-                jsonBlock = `"release_pages": {\n  "${packageName}": "${url}"\n}`;
+                source = {
+                    type: 'html_page',
+                    url
+                };
             }
 
 
@@ -374,9 +395,8 @@
 
 
 
-            
 
-            
+
             // Build the issue body
             const body = `### Package: ${packageName}
 
@@ -395,7 +415,7 @@
             // Open GitHub issue
             const title = `Add: ${packageName}`;
             const url = `https://github.com/dodog/pakchan/issues/new?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}&labels=submission`;
-            
+
             showSuccess();
             setTimeout(() => {
                 window.open(url, '_blank');
@@ -410,17 +430,17 @@
 
 
 
-        
+
         function showSuccess() {
             document.getElementById('successMessage').style.display = 'block';
             document.getElementById('errorMessage').style.display = 'none';
         }
-        
+
         function showError(msg) {
             const el = document.getElementById('errorMessage');
             // Convert URLs to clickable links
             msg = msg.replace(
-                /(https:\/\/[^\s]+)/g, 
+                /(https:\/\/[^\s]+)/g,
                 '<a href="$1" target="_blank">$1</a>'
             );
             el.innerHTML = '✗ ' + msg.replace(/\n/g, '<br>');
@@ -428,9 +448,7 @@
             document.getElementById('successMessage').style.display = 'none';
             setTimeout(() => el.style.display = 'none', 8000);
         }
-
-
-
     </script>
 </body>
+
 </html>
