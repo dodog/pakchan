@@ -6,8 +6,8 @@ on:
 
 jobs:
   process:
-    # Only run when 'validated' label is added
-    if: github.event.label.name == 'validated'
+    # Only run when 'submission' or 'validated' label is added
+    if: contains(fromJson('["submission", "validated"]'), github.event.label.name)
     runs-on: ubuntu-latest
     permissions:
       issues: write
@@ -37,16 +37,43 @@ jobs:
               print("ERROR: No issue body provided")
               sys.exit(1)
           
-          # Extract the JSON block from the issue body (between ```json and ```)
-          json_match = re.search(r'```json\s*\n(.*?)\n```', body, re.DOTALL)
-          if not json_match:
-              print("ERROR: Could not find JSON block in issue body")
-              sys.exit(1)
+          print(f"DEBUG: Issue body length: {len(body)}")
           
-          try:
-              submission = json.loads(json_match.group(1))
-          except json.JSONDecodeError as e:
-              print(f"ERROR: Invalid JSON in submission: {e}")
+          # Try multiple patterns to extract JSON
+          submission = None
+          
+          # Pattern 1: Code fences with json marker (flexible whitespace)
+          json_match = re.search(r'```json\s*(.*?)```', body, re.DOTALL)
+          if json_match:
+              try:
+                  submission = json.loads(json_match.group(1).strip())
+                  print("DEBUG: Found JSON in code fence")
+              except json.JSONDecodeError as e:
+                  print(f"DEBUG: Pattern 1 failed: {e}")
+          
+          # Pattern 2: Just code fences
+          if not submission:
+              json_match = re.search(r'```\s*(\{.*?\})\s*```', body, re.DOTALL)
+              if json_match:
+                  try:
+                      submission = json.loads(json_match.group(1).strip())
+                      print("DEBUG: Found JSON in plain code fence")
+                  except json.JSONDecodeError as e:
+                      print(f"DEBUG: Pattern 2 failed: {e}")
+          
+          # Pattern 3: Look for JSON object directly
+          if not submission:
+              json_match = re.search(r'(\{[^{}]*"package_name"[^{}]*\})', body, re.DOTALL)
+              if json_match:
+                  try:
+                      submission = json.loads(json_match.group(1).strip())
+                      print("DEBUG: Found JSON object directly")
+                  except json.JSONDecodeError as e:
+                      print(f"DEBUG: Pattern 3 failed: {e}")
+          
+          if not submission:
+              print(f"ERROR: Could not find JSON block in issue body")
+              print(f"DEBUG: Body preview: {body[:800]}")
               sys.exit(1)
           
           # Extract package name and sources from submission
