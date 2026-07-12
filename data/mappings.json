@@ -129,7 +129,7 @@
       "url":    "https://gpsd.gitlab.io/gpsd/NEWS",
       "parser": "text_file"
     },
-     "mkvtoolnix": {
+     "mkvtoolnix-gui": {
       "url":    "https://codeberg.org/mbunkus/mkvtoolnix/raw/branch/main/NEWS.md",
       "parser": "text_file"
     },
