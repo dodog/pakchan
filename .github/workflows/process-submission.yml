@@ -31,54 +31,56 @@ jobs:
           python3 << 'PYEOF'
           import json, os, re, sys
 
-          # Parse the simplified format
-          import re
-          
-          # Extract the JSON-like block from the issue
-          block_match = re.search(r'"(github|gitlab|release_pages|custom|releasebot)"\s*:\s*\{([^}]+)\}', body, re.DOTALL)
-          if not block_match:
-              print("ERROR: Could not parse submission format")
+          # Get the issue body from environment variable
+          body = os.environ.get('ISSUE_BODY', '')
+          if not body:
+              print("ERROR: No issue body provided")
               sys.exit(1)
           
-          section = block_match.group(1)
-          content = "{" + block_match.group(2) + "}"
+          # Extract the JSON block from the issue body (between ```json and ```)
+          json_match = re.search(r'```json\s*\n(.*?)\n```', body, re.DOTALL)
+          if not json_match:
+              print("ERROR: Could not find JSON block in issue body")
+              sys.exit(1)
           
           try:
-              data = json.loads(content)
-          except:
-              print("ERROR: Invalid format")
+              submission = json.loads(json_match.group(1))
+          except json.JSONDecodeError as e:
+              print(f"ERROR: Invalid JSON in submission: {e}")
               sys.exit(1)
           
-          # Get the first (and only) key
-          pkg_name = list(data.keys())[0].lower().strip()
-          value = data[pkg_name]
+          # Extract package name and sources from submission
+          if 'package_name' not in submission or 'sources' not in submission:
+              print("ERROR: Missing package_name or sources in submission")
+              sys.exit(1)
+          
+          pkg_name = submission['package_name'].lower().strip()
+          sources = submission['sources']
           
           print(f"Package: {pkg_name}")
-          print(f"Section: {section}")
-          print(f"Value: {value}")
+          print(f"Sources: {sources}")
           
           # Load current mappings
           with open('data/mappings.json') as f:
               mappings = json.load(f)
           
-          # Ensure section exists
-          if section not in mappings:
-              mappings[section] = {}
+          # Ensure 'packages' key exists
+          if 'packages' not in mappings:
+              mappings['packages'] = {}
           
-          # Add the package
-          if section in ["github", "release_pages", "releasebot"]:
-              mappings[section][pkg_name] = value
-          elif section in ["gitlab", "custom"]:
-              mappings[section][pkg_name] = value
+          # Check if package already exists
+          if pkg_name in mappings['packages']:
+              print(f"ERROR: Package {pkg_name} already exists in mappings")
+              sys.exit(1)
+          
+          # Add the package with its sources
+          mappings['packages'][pkg_name] = {
+              'name': pkg_name,
+              'sources': sources
+          }
           
           # Update total count
-          total = 0
-          for key in ["github", "gitlab", "release_pages", "custom"]:
-              if key in mappings:
-                  total += len(mappings[key])
-          if "releasebot" in mappings:
-              total += len(mappings["releasebot"])
-          mappings["total_packages"] = total
+          mappings['total_packages'] = len(mappings['packages'])
 
 
 
