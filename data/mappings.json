@@ -46,6 +46,7 @@
     "downgrade": "archlinux-downgrade/downgrade",
     "element-desktop": "element-hq/element-web",
     "element-web": "element-hq/element-web",
+    "eslint": "eslint/eslint",    
     "fastfetch": "fastfetch-cli/fastfetch",
     "ffmpeg": "FFmpeg/FFmpeg",
     "flameshot": "flameshot-org/flameshot",
