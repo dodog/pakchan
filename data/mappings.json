@@ -78,6 +78,7 @@
     "rapid-photo-downloader": "damonlynch/rapid-photo-downloader",
     "rawtherapee": "Beep6581/RawTherapee",
     "rust": "rust-lang/rust",
+    "ruby": "ruby/ruby",
     "shotcut": "mltframework/shotcut",
     "signal-desktop": "signalapp/Signal-Desktop",
     "steam": "ValveSoftware/steam-for-linux",
@@ -155,6 +156,10 @@
       "host": "gitlab.com",
       "repo": "Remmina/Remmina"
     },    
+    "qemu-base": {
+      "host": "gitlab.com",
+      "repo": "qemu-project/qemu"
+    },      
     "wireshark": {
       "host": "gitlab.com",
       "repo": "wireshark/wireshark"
