@@ -92,6 +92,7 @@
     "vim": "vim/vim",
     "vscodium": "VSCodium/vscodium",
     "webcamoid": "webcamoid/webcamoid",
+    "btrfs-progs": "kdave/btrfs-progs",    
     "zulucrypt": "mhogomchungu/zuluCrypt",
     "zulumount": "mhogomchungu/zuluCrypt"
   },
@@ -112,6 +113,32 @@
       "host": "gitlab.gnome.org",
       "repo": "GNOME/gparted"
     },
+    "gstreamer": {
+      "host": "gitlab.freedesktop.org",
+      "repo": "gstreamer/gstreamer"
+    },    
+    "gst-plugins-bad": {
+      "host": "gitlab.freedesktop.org",
+      "repo": "gstreamer/gst-plugins-bad"
+    },   
+    "gst-plugins-base": {
+      "host": "gitlab.freedesktop.org",
+      "repo": "gstreamer/gst-plugins-base"
+    },   
+    "gst-plugins-good": {
+      "host": "gitlab.freedesktop.org",
+      "repo": "gstreamer/gst-plugins-good"
+    },   
+    "gst-plugins-rs": {
+      "host": "gitlab.freedesktop.org",
+      "repo": "gstreamer/gst-plugins-rs"
+    },   
+    "plymouth": {
+      "host": "gitlab.freedesktop.org",
+      "repo": "plymouth/plymouth"
+    },   
+
+    
     "gthumb": {
       "host": "gitlab.gnome.org",
       "repo": "GNOME/gthumb"
