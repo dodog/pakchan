@@ -149,6 +149,10 @@
       "host": "gitlab.winehq.org",
       "repo": "mono/wine-mono"
     },
+    "remmmina": {
+      "host": "gitlab.com",
+      "repo": "Remmina/Remmina"
+    },    
     "wireshark": {
       "host": "gitlab.com",
       "repo": "wireshark/wireshark"
