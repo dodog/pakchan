@@ -42,7 +42,8 @@
     "curl": "curl/curl",
     "darktable": "darktable-org/darktable",
     "doublecmd": "doublecmd/doublecmd",
-    "doublecmd-qt": "doublecmd/doublecmd",
+    "doublecmd-qt5": "doublecmd/doublecmd",
+    "doublecmd-qt6": "doublecmd/doublecmd",
     "downgrade": "archlinux-downgrade/downgrade",
     "element-desktop": "element-hq/element-web",
     "element-web": "element-hq/element-web",
@@ -58,7 +59,7 @@
     "helix": "helix-editor/helix",
     "htop": "htop-dev/htop",
     "kdenlive": "KDE/kdenlive",
-    "keepassxc": "keepassxc/keepassxc",
+    "keepassxc": "keepassxreboot/keepassxc",
     "kitty": "kovidgoyal/kitty",
     "less": "gwsw/less",
     "monero": "monero-project/monero",
@@ -85,7 +86,6 @@
     "sudo": "sudo-project/sudo",
     "syncthing": "syncthing/syncthing",
     "telegram-desktop": "telegramdesktop/tdesktop",
-    "thunar": "xfce/thunar",
     "transmission-gtk": "transmission/transmission",
     "transmission-qt": "transmission/transmission",
     "veracrypt": "veracrypt/VeraCrypt",
@@ -137,8 +137,110 @@
       "host": "gitlab.freedesktop.org",
       "repo": "plymouth/plymouth"
     },   
-
-    
+    "kdenlive": {
+      "host": "invent.kde.org",
+      "repo": "multimedia/kdenlive"
+    },
+    "kactivitymanagerd": {
+      "host": "invent.kde.org",
+      "repo": "plasma/kactivitymanagerd"
+    },
+    "karchive": {
+      "host": "invent.kde.org",
+      "repo": "frameworks/karchive"
+    },
+    "kcontacts": {
+      "host": "invent.kde.org",
+      "repo": "frameworks/kcontacts"
+    },
+    "kdesu": {
+      "host": "invent.kde.org",
+      "repo": "frameworks/kdesu"
+    },
+    "kpipewire": {
+      "host": "invent.kde.org",
+      "repo": "plasma/kpipewire"
+    },
+    "kde-cli-tools": {
+      "host": "invent.kde.org",
+      "repo": "plasma/kde-cli-tools"
+    },
+    "discover": {
+      "host": "invent.kde.org",
+      "repo": "plasma/discover"
+    },
+    "kwin": {
+      "host": "invent.kde.org",
+      "repo": "plasma/kwin"
+    },
+    "kdecoration": {
+      "host": "invent.kde.org",
+      "repo": "plasma/kdecoration"
+    },
+    "plasma-desktop": {
+      "host": "invent.kde.org",
+      "repo": "plasma/plasma-desktop"
+    },
+    "latte-dock": {
+      "host": "invent.kde.org",
+      "repo": "plasma/latte-dock"
+    },
+    "xdg-desktop-portal-kde": {
+      "host": "invent.kde.org",
+      "repo": "plasma/xdg-desktop-portal-kde"
+    },
+    "smb4k": {
+      "host": "invent.kde.org",
+      "repo": "network/smb4k"
+    },
+    "gwenview": {
+      "host": "invent.kde.org",
+      "repo": "graphics/gwenview"
+    },
+    "tellico": {
+      "host": "invent.kde.org",
+      "repo": "office/tellico"
+    },
+    "calligra": {
+      "host": "invent.kde.org",
+      "repo": "office/calligra"
+    },
+    "optiimage": {
+      "host": "invent.kde.org",
+      "repo": "graphics/optiimage"
+    },
+    "kmymoney": {
+      "host": "invent.kde.org",
+      "repo": "office/kmymoney"
+    },
+    "skrooge": {
+      "host": "invent.kde.org",
+      "repo": "office/skrooge"
+    },
+    "krusader": {
+      "host": "invent.kde.org",
+      "repo": "utilities/krusader"
+    },
+    "amarok": {
+      "host": "invent.kde.org",
+      "repo": "multimedia/amarok"
+    },
+    "kid3": {
+      "host": "invent.kde.org",
+      "repo": "multimedia/kid3"
+    },
+    "elisa": {
+      "host": "invent.kde.org",
+      "repo": "multimedia/elisa"
+    },
+    "k3b": {
+      "host": "invent.kde.org",
+      "repo": "multimedia/k3b"
+    },
+    "juk": {
+      "host": "invent.kde.org",
+      "repo": "multimedia/juk"
+    },
     "gthumb": {
       "host": "gitlab.gnome.org",
       "repo": "GNOME/gthumb"
