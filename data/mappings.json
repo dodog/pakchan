@@ -289,6 +289,10 @@
       "host": "gitlab.com",
       "repo": "qemu-project/qemu"
     },      
+    "gimp": {
+      "host": "gitlab.gnome.org",
+      "repo": "GNOME/gimp/"
+    },          
     "wireshark": {
       "host": "gitlab.com",
       "repo": "wireshark/wireshark"
@@ -313,7 +317,6 @@
     "filezilla": "https://filezilla-project.org/versions.php",
     "firefox": "https://www.mozilla.org/en-US/firefox/releases/",
     "firefox-esr": "https://www.mozilla.org/en-US/firefox/releases/",
-    "gimp": "https://www.gimp.org/release-notes/",
     "grsync": "https://www.opbyte.it/grsync/changes.html",
     "keepass": "https://keepass.info/news/news_all.html",
     "krita": "https://krita.org/en/release-notes/",
