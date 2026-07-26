@@ -291,7 +291,7 @@
     },      
     "gimp": {
       "host": "gitlab.gnome.org",
-      "repo": "GNOME/gimp/"
+      "repo": "GNOME/gimp"
     },          
     "wireshark": {
       "host": "gitlab.com",
