@@ -275,7 +275,7 @@
     },
     "wine": {
       "host": "gitlab.winehq.org",
-      "repo": "/wine/wine"
+      "repo": "wine/wine"
     },
     "wine-mono": {
       "host": "gitlab.winehq.org",
