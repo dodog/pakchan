@@ -93,6 +93,7 @@
     "vscodium": "VSCodium/vscodium",
     "webcamoid": "webcamoid/webcamoid",
     "btrfs-progs": "kdave/btrfs-progs",    
+    "gnucash": "Gnucash/gnucash",    
     "zulucrypt": "mhogomchungu/zuluCrypt",
     "zulumount": "mhogomchungu/zuluCrypt"
   },
@@ -292,25 +293,39 @@
     "gimp": {
       "host": "gitlab.gnome.org",
       "repo": "GNOME/gimp"
+    },  
+    "gnome-console": {
+      "host": "gitlab.gnome.org",
+      "repo": "GNOME/console"
+    },    
+    "manjaro-settings-manager": {
+      "host": "gitlab.manjaro.org",
+      "repo": "applications/manjaro-settings-manager"
+    },   
+    "manjaro-gnome-settings": {
+      "host": "gitlab.manjaro.org",
+      "repo": "profiles-and-settings/manjaro-gnome-settings"
+    },    
+    "manjaro-kde-settings": {
+      "host": "gitlab.manjaro.org",
+      "repo": "profiles-and-settings/manjaro-kde-settings"
+    },       
+    "pacman-mirrors": {
+      "host": "gitlab.manjaro.org",
+      "repo": "applications/pacman-mirrors"
     },          
+    "mhwd": {
+      "host": "gitlab.manjaro.org",
+      "repo": "applications/mhwd"
+    },        
     "wireshark": {
       "host": "gitlab.com",
       "repo": "wireshark/wireshark"
     }
   },
-  "packages": {
-    "git": {
-      "name": "git",
-      "sources": [
-        {
-          "repo": "git/git",
-          "type": "github_releases"
-        }
-      ]
-    }
-  },
+
   "release_pages": {
-    "blender": "https://www.blender.org/download/releases/",
+    "blender": "https://www.blender.org/download/releases",
     "chromium": "https://chromereleases.googleblog.com/search/label/Stable%20updates",
     "code": "https://code.visualstudio.com/updates",
     "docker-desktop": "https://docs.docker.com/desktop/release-notes/",
