@@ -200,7 +200,7 @@
             <div class="nav">
                 <a href="index.html">← Submit Package</a>
                 <a href="https://github.com/dodog/pakchan">GitHub</a>
-                <a href="https://dodog.github.io/pakchan/data/mappings.json">Raw JSON</a>
+                <a href="https://raw.githubusercontent.com/dodog/pakchan/main/data/mappings.json">Raw JSON</a>
             </div>
         </header>
         
@@ -215,10 +215,9 @@
         
         <div class="filter-bar" id="filterBar">
             <button class="filter-btn active" data-filter="all">All</button>
-            <button class="filter-btn" data-filter="github_releases">GitHub</button>
-            <button class="filter-btn" data-filter="gitlab_releases">GitLab</button>
-            <button class="filter-btn" data-filter="html_page">HTML Page</button>
-            <button class="filter-btn" data-filter="mozilla_releases">Mozilla</button>
+            <button class="filter-btn" data-filter="github">GitHub</button>
+            <button class="filter-btn" data-filter="gitlab">GitLab</button>
+            <button class="filter-btn" data-filter="release_pages">Release Notes</button>
             <button class="filter-btn" data-filter="text_file">Text File</button>
             <button class="filter-btn" data-filter="other">Other</button>
         </div>
@@ -234,50 +233,61 @@
     </div>
     
     <script>
+        const MAPPINGS_URL = 'https://raw.githubusercontent.com/dodog/pakchan/main/data/mappings.json';
+        // Types produced directly by github/gitlab/release_pages; anything else (e.g. a
+        // "custom" entry with parser "mantisbt") falls into "other".
+        const KNOWN_TYPES = ['github', 'gitlab', 'release_pages', 'text_file'];
+
         let allPackages = {};
         let currentFilter = 'all';
-        
 
-        fetch('https://raw.githubusercontent.com/dodog/pakchan/main/data/mappings.json')
+        fetch(MAPPINGS_URL)
             .then(r => r.json())
             .then(data => {
-                // Flatten all sections into one list
                 allPackages = {};
-                
-                // GitHub
+
                 for (const [name, repo] of Object.entries(data.github || {})) {
-                    allPackages[name] = { name, type: 'github_releases', value: repo };
+                    allPackages[name] = { name, type: 'github', value: repo };
                 }
-                // GitLab
                 for (const [name, gl] of Object.entries(data.gitlab || {})) {
-                    allPackages[name] = { name, type: 'gitlab_releases', value: `${gl.host}/${gl.repo}` };
+                    allPackages[name] = { name, type: 'gitlab', value: `${gl.host}/${gl.repo}` };
                 }
-                // Release pages
                 for (const [name, url] of Object.entries(data.release_pages || {})) {
-                    allPackages[name] = { name, type: 'html_page', value: url };
+                    allPackages[name] = { name, type: 'release_pages', value: url };
                 }
-                // Custom
                 for (const [name, custom] of Object.entries(data.custom || {})) {
                     allPackages[name] = { name, type: custom.parser || 'custom', value: custom.url };
                 }
-                
+
                 document.getElementById('totalCount').textContent = Object.keys(allPackages).length;
-                document.getElementById('lastUpdated').textContent = data.last_updated || '?';
                 renderPackages();
+            })
+            .catch(err => {
+                console.error('Failed to load mappings.json:', err);
+                document.getElementById('packageList').innerHTML =
+                    '<div class="empty">Failed to load the package database. Try again later.</div>';
+                document.getElementById('totalCount').textContent = '?';
             });
 
+        // Best-effort: mappings.json itself has no "last updated" field, so pull the
+        // date of the most recent commit that touched it.
+        fetch('https://api.github.com/repos/dodog/pakchan/commits?path=data/mappings.json&per_page=1')
+            .then(r => r.ok ? r.json() : Promise.reject())
+            .then(commits => {
+                if (commits && commits[0]) {
+                    const date = new Date(commits[0].commit.committer.date);
+                    document.getElementById('lastUpdated').textContent = date.toLocaleDateString();
+                } else {
+                    document.getElementById('lastUpdated').textContent = 'unknown';
+                }
+            })
+            .catch(() => {
+                document.getElementById('lastUpdated').textContent = 'unknown';
+            });
 
-
-
-
-
-
-
-
-        
         // Search
         document.getElementById('searchInput').addEventListener('input', renderPackages);
-        
+
         // Filter buttons
         document.querySelectorAll('.filter-btn').forEach(btn => {
             btn.addEventListener('click', function() {
@@ -287,84 +297,76 @@
                 renderPackages();
             });
         });
-        
+
         function renderPackages() {
             const searchTerm = document.getElementById('searchInput').value.toLowerCase();
             const container = document.getElementById('packageList');
-            
-            // Filter packages
+
             let filtered = Object.entries(allPackages);
-            
+
             if (searchTerm) {
-                filtered = filtered.filter(([name, info]) => 
-                    name.toLowerCase().includes(searchTerm) ||
-                    (info.name && info.name.toLowerCase().includes(searchTerm))
-                );
+                filtered = filtered.filter(([name]) => name.toLowerCase().includes(searchTerm));
             }
-            
+
             if (currentFilter !== 'all') {
-                filtered = filtered.filter(([name, info]) => {
-                    const sources = info.sources || [];
-                    return sources.some(s => s.type === currentFilter);
+                filtered = filtered.filter(([, info]) => {
+                    if (currentFilter === 'other') return !KNOWN_TYPES.includes(info.type);
+                    return info.type === currentFilter;
                 });
             }
-            
-            // Sort alphabetically
+
             filtered.sort((a, b) => a[0].localeCompare(b[0]));
-            
+
             if (filtered.length === 0) {
                 container.innerHTML = '<div class="empty">No packages found</div>';
                 return;
             }
-            
-            // Render
-            container.innerHTML = filtered.map(([name, info]) => {
-                const sources = info.sources || [];
-                return `
-                    <div class="package-card">
-                        <div class="package-header">
-                            <span class="package-name">${escapeHtml(name)}</span>
-                            ${info.name && info.name !== name ? 
-                                `<span style="color:#8b949e;font-size:0.9em;">(${escapeHtml(info.name)})</span>` : ''}
-                        </div>
-                        ${sources.map(s => `
-                            <div class="source-info">
-                                ${getSourceIcon(s.type)} 
-                                ${getSourceLabel(s.type)}: 
-                                <code>${escapeHtml(s.repo || s.url || s.host + '/' + s.repo || 'N/A')}</code>
-                            </div>
-                        `).join('')}
+
+            container.innerHTML = filtered.map(([name, info]) => `
+                <div class="package-card">
+                    <div class="package-header">
+                        <span class="package-name">${escapeHtml(name)}</span>
+                        <span class="source-badge ${getBadgeClass(info.type)}">
+                            ${getSourceIcon(info.type)} ${escapeHtml(getSourceLabel(info.type))}
+                        </span>
                     </div>
-                `;
-            }).join('');
+                    <div class="source-info"><code>${escapeHtml(info.value || 'N/A')}</code></div>
+                </div>
+            `).join('');
         }
-        
+
+        function getBadgeClass(type) {
+            const classes = {
+                github: 'badge-github',
+                gitlab: 'badge-gitlab',
+                release_pages: 'badge-html',
+                text_file: 'badge-text'
+            };
+            return classes[type] || 'badge-other';
+        }
+
         function getSourceIcon(type) {
             const icons = {
-                'github_releases': '🐙',
-                'gitlab_releases': '🦊',
-                'html_page': '🌐',
-                'mozilla_releases': '🦊',
-                'text_file': '📄',
-                'releasebot': '🤖',
-                'custom_parser': '🔧'
+                github: '🐙',
+                gitlab: '🦊',
+                release_pages: '🌐',
+                text_file: '📄',
+                mantisbt: '🐛'
             };
             return icons[type] || '📌';
         }
-        
+
         function getSourceLabel(type) {
             const labels = {
-                'github_releases': 'GitHub',
-                'gitlab_releases': 'GitLab',
-                'html_page': 'Release Notes',
-                'mozilla_releases': 'Mozilla',
-                'text_file': 'Text File',
-                'releasebot': 'ReleaseBot',
-                'custom_parser': 'Custom'
+                github: 'GitHub',
+                gitlab: 'GitLab',
+                release_pages: 'Release Notes',
+                text_file: 'Text File',
+                mantisbt: 'MantisBT'
             };
             return labels[type] || type;
         }
-        
+
         function escapeHtml(text) {
             const div = document.createElement('div');
             div.textContent = text;
