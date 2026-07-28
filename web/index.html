@@ -160,28 +160,6 @@
             border-radius: 6px;
             display: none;
             margin-bottom: 16px;
-        }
-
-        .stats {
-            text-align: center;
-            font-size: 0.85em;
-            color: #8b949e;
-            margin-top: 20px;
-        }
-
-        .stats span {
-            color: #58a6ff;
-            font-weight: 600;
-        }
-
-
-        .error-message {
-            background: #341b1b;
-            border: 1px solid #f85149;
-            padding: 12px;
-            border-radius: 6px;
-            display: none;
-            margin-bottom: 16px;
             white-space: pre-line;
             font-size: 0.9em;
         }
@@ -189,7 +167,6 @@
         .error-message a {
             color: #58a6ff;
         }
-
 
         .nav {
             margin-top: 12px;
@@ -221,9 +198,6 @@
                 <a href="https://github.com/dodog/pakchan">GitHub</a>
             </div>
         </header>
-
-
-
 
         <div class="success-message" id="successMessage">✓ Submitted! Redirecting to GitHub...</div>
         <div class="error-message" id="errorMessage"></div>
@@ -290,6 +264,9 @@
     </div>
 
     <script>
+        const MAPPINGS_URL = 'https://raw.githubusercontent.com/dodog/pakchan/main/data/mappings.json';
+        const MAPPING_SECTIONS = ['github', 'gitlab', 'custom', 'release_pages'];
+
         // Show/hide fields based on source type
         document.getElementById('sourceType').addEventListener('change', function() {
             const type = this.value;
@@ -300,7 +277,7 @@
         });
 
         // Load stats
-        fetch('https://raw.githubusercontent.com/dodog/pakchan/main/data/mappings.json')
+        fetch(MAPPINGS_URL)
             .then(r => r.json())
             .then(data => {
                 document.getElementById('packageCount').textContent = data.total_packages || 0;
@@ -308,6 +285,35 @@
             .catch(() => {
                 document.getElementById('packageCount').textContent = 'many';
             });
+
+        // Given a source type + form inputs, build {type, value} matching mappings.json's schema
+        function buildSubmission(packageName, sourceType) {
+            if (sourceType === 'github_releases') {
+                const repo = document.querySelector('#fieldGithub input').value.trim();
+                if (!repo) return { error: 'Please enter a GitHub repository (owner/repo)' };
+                if (!repo.includes('/')) return { error: 'GitHub repository must be in owner/repo format' };
+                return { type: 'github', value: repo };
+            }
+
+            if (sourceType === 'gitlab_releases') {
+                const host = document.querySelector('#fieldGitlab input').value.trim();
+                const repo = document.querySelector('#fieldGitlabRepo input').value.trim();
+                if (!host) return { error: 'Please enter a GitLab host' };
+                if (!repo) return { error: 'Please enter a GitLab repository path' };
+                return { type: 'gitlab', value: { host, repo } };
+            }
+
+            if (sourceType === 'text_file') {
+                const url = document.querySelector('#fieldUrl input').value.trim();
+                if (!url) return { error: 'Please enter a URL for the text file' };
+                return { type: 'custom', value: { parser: 'text_file', url } };
+            }
+
+            // html_page, mozilla_releases, other -> all land in release_pages as a plain URL
+            const url = document.querySelector('#fieldUrl input').value.trim();
+            if (!url) return { error: 'Please enter a URL' };
+            return { type: 'release_pages', value: url };
+        }
 
         // Form submission with duplicate check
         document.getElementById('submitForm').addEventListener('submit', async function(e) {
@@ -322,122 +328,56 @@
                     return;
                 }
 
-                console.log('Form submitted:', {
-                    packageName,
-                    sourceType
-                });
+                const submission = buildSubmission(packageName, sourceType);
+                if (submission.error) {
+                    showError(submission.error);
+                    return;
+                }
 
-                // Check if package already exists in Pakchan
+                // Check if package already exists anywhere in mappings.json
                 try {
-                    const response = await fetch('https://raw.githubusercontent.com/dodog/pakchan/main/data/mappings.json');
+                    const response = await fetch(MAPPINGS_URL);
                     const data = await response.json();
-                    const packages = data.packages || {};
 
-                    if (packages[packageName]) {
-                        const existing = packages[packageName];
-                        const sourceCount = existing.sources ? existing.sources.length : 0;
-
-                        showError(
-                            `⚠️ "${packageName}" already exists in the database with ${sourceCount} source(s).\n\n` +
-                            `To update it, please create an issue manually:\n` +
-                            `https://github.com/dodog/pakchan/issues/new?title=Update:%20${packageName}`
-                        );
-                        return;
+                    for (const section of MAPPING_SECTIONS) {
+                        const bucket = data[section] || {};
+                        if (bucket[packageName]) {
+                            showError(
+                                `⚠️ "${packageName}" already exists in the database under "${section}".\n\n` +
+                                `To update it, please create an issue manually:\n` +
+                                `https://github.com/dodog/pakchan/issues/new?title=Update:%20${packageName}`
+                            );
+                            return;
+                        }
                     }
                 } catch (err) {
                     console.warn('Could not check for duplicates:', err);
                 }
 
-                // Build the submission source object in the expected format
-                let source = {};
-                if (sourceType === 'github_releases') {
-                    const repo = document.querySelector('#fieldGithub input').value.trim();
-                    if (!repo) {
-                        showError('Please enter a GitHub repository (owner/repo)');
-                        return;
-                    }
-                    source = {
-                        type: 'github_releases',
-                        repo
-                    };
-                } else if (sourceType === 'gitlab_releases') {
-                    const host = document.querySelector('#fieldGitlab input').value.trim();
-                    const repo = document.querySelector('#fieldGitlabRepo input').value.trim();
-                    if (!host) {
-                        showError('Please enter a GitLab host');
-                        return;
-                    }
-                    if (!repo) {
-                        showError('Please enter a GitLab repository path');
-                        return;
-                    }
-                    source = {
-                        type: 'gitlab_releases',
-                        host,
-                        repo
-                    };
-                } else if (sourceType === 'html_page') {
-                    const url = document.querySelector('#fieldUrl input').value.trim();
-                    if (!url) {
-                        showError('Please enter a URL for the release notes page');
-                        return;
-                    }
-                    source = {
-                        type: 'html_page',
-                        url
-                    };
-                } else if (sourceType === 'mozilla_releases') {
-                    const url = document.querySelector('#fieldUrl input').value.trim();
-                    if (!url) {
-                        showError('Please enter a URL for the Mozilla release notes');
-                        return;
-                    }
-                    source = {
-                        type: 'mozilla_releases',
-                        url
-                    };
-                } else if (sourceType === 'text_file') {
-                    const url = document.querySelector('#fieldUrl input').value.trim();
-                    if (!url) {
-                        showError('Please enter a URL for the text file');
-                        return;
-                    }
-                    source = {
-                        type: 'text_file',
-                        url
-                    };
-                } else {
-                    const url = document.querySelector('#fieldUrl input').value.trim();
-                    if (!url) {
-                        showError('Please enter a URL');
-                        return;
-                    }
-                    source = {
-                        type: 'html_page',
-                        url
-                    };
-                }
+                const fullSubmission = {
+                    package_name: packageName,
+                    type: submission.type,
+                    value: submission.value
+                };
 
                 // Build the issue body
                 const body = `### Package: ${packageName}
 
 **Source Type:** ${sourceType}
-${source.repo ? `**Repository:** ${source.repo}` : ''}
-${source.host ? `**Host:** ${source.host}` : ''}
-${source.url ? `**URL:** ${source.url}` : ''}
 
 \`\`\`json
-${JSON.stringify({package_name: packageName, sources: [source]}, null, 2)}
+${JSON.stringify(fullSubmission, null, 2)}
 \`\`\`
 
 ---
 *Submitted via [Pakchan web form](https://dodog.github.io/pakchan/web/)*`;
 
-                // Open GitHub issue
+                // Open GitHub issue. NOTE: no "submission" label is auto-applied here on
+                // purpose -- a maintainer reviews the issue and adds the "validated" label,
+                // which is what actually triggers the automation that writes to mappings.json.
                 const title = `Add: ${packageName}`;
                 const url = `https://github.com/dodog/pakchan/issues/new?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}&labels=submission`;
 
-                console.log('Opening GitHub issue:', url);
                 showSuccess();
                 setTimeout(() => {
                     window.open(url, '_blank');
@@ -455,30 +395,6 @@ ${JSON.stringify({package_name: packageName, sources: [source]}, null, 2)}
 
         function showError(msg) {
             const el = document.getElementById('errorMessage');
-            // Convert URLs to clickable links
-            msg = msg.replace(
-                /(https:\/\/[^\s]+)/g,
-                '<a href="$1" target="_blank">$1</a>'
-            );
-            el.innerHTML = '✗ ' + msg.replace(/\n/g, '<br>');
-            el.style.display = 'block';
-            document.getElementById('successMessage').style.display = 'none';
-            setTimeout(() => el.style.display = 'none', 8000);
-        }
-
-
-
-
-
-
-        function showSuccess() {
-            document.getElementById('successMessage').style.display = 'block';
-            document.getElementById('errorMessage').style.display = 'none';
-        }
-
-        function showError(msg) {
-            const el = document.getElementById('errorMessage');
-            // Convert URLs to clickable links
             msg = msg.replace(
                 /(https:\/\/[^\s]+)/g,
                 '<a href="$1" target="_blank">$1</a>'
