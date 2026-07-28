@@ -36,6 +36,7 @@
     "bazaar": "bazaar-org/bazaar",
     "bitwarden": "bitwarden/clients",
     "btop": "aristocratos/btop",
+    "btrfs-progs": "kdave/btrfs-progs",
     "calibre": "kovidgoyal/calibre",
     "cardpeek": "L1L1/cardpeek",
     "containerd": "containerd/containerd",
@@ -47,11 +48,13 @@
     "downgrade": "archlinux-downgrade/downgrade",
     "element-desktop": "element-hq/element-web",
     "element-web": "element-hq/element-web",
-    "eslint": "eslint/eslint",    
+    "eslint": "eslint/eslint",
     "fastfetch": "fastfetch-cli/fastfetch",
     "ffmpeg": "FFmpeg/FFmpeg",
     "flameshot": "flameshot-org/flameshot",
     "gdm-settings": "gdm-settings/gdm-settings",
+    "git": "git/git",
+    "gnucash": "Gnucash/gnucash",
     "go": "golang/go",
     "gramps": "gramps-project/gramps",
     "gsmartcontrol": "ashaduri/gsmartcontrol",
@@ -78,8 +81,8 @@
     "qbittorrent": "qbittorrent/qBittorrent",
     "rapid-photo-downloader": "damonlynch/rapid-photo-downloader",
     "rawtherapee": "Beep6581/RawTherapee",
-    "rust": "rust-lang/rust",
     "ruby": "ruby/ruby",
+    "rust": "rust-lang/rust",
     "shotcut": "mltframework/shotcut",
     "signal-desktop": "signalapp/Signal-Desktop",
     "steam": "ValveSoftware/steam-for-linux",
@@ -92,19 +95,41 @@
     "vim": "vim/vim",
     "vscodium": "VSCodium/vscodium",
     "webcamoid": "webcamoid/webcamoid",
-    "btrfs-progs": "kdave/btrfs-progs",    
-    "gnucash": "Gnucash/gnucash",    
     "zulucrypt": "mhogomchungu/zuluCrypt",
     "zulumount": "mhogomchungu/zuluCrypt"
   },
   "gitlab": {
+    "amarok": {
+      "host": "invent.kde.org",
+      "repo": "multimedia/amarok"
+    },
+    "calligra": {
+      "host": "invent.kde.org",
+      "repo": "office/calligra"
+    },
     "digikam": {
       "host": "invent.kde.org",
       "repo": "graphics/digikam"
     },
+    "discover": {
+      "host": "invent.kde.org",
+      "repo": "plasma/discover"
+    },
     "dolphin": {
       "host": "invent.kde.org",
       "repo": "system/dolphin"
+    },
+    "elisa": {
+      "host": "invent.kde.org",
+      "repo": "multimedia/elisa"
+    },
+    "gimp": {
+      "host": "gitlab.gnome.org",
+      "repo": "GNOME/gimp"
+    },
+    "gnome-console": {
+      "host": "gitlab.gnome.org",
+      "repo": "GNOME/console"
     },
     "gnome-control-center": {
       "host": "gitlab.gnome.org",
@@ -114,133 +139,25 @@
       "host": "gitlab.gnome.org",
       "repo": "GNOME/gparted"
     },
-    "gstreamer": {
-      "host": "gitlab.freedesktop.org",
-      "repo": "gstreamer/gstreamer"
-    },    
     "gst-plugins-bad": {
       "host": "gitlab.freedesktop.org",
       "repo": "gstreamer/gst-plugins-bad"
-    },   
+    },
     "gst-plugins-base": {
       "host": "gitlab.freedesktop.org",
       "repo": "gstreamer/gst-plugins-base"
-    },   
+    },
     "gst-plugins-good": {
       "host": "gitlab.freedesktop.org",
       "repo": "gstreamer/gst-plugins-good"
-    },   
+    },
     "gst-plugins-rs": {
       "host": "gitlab.freedesktop.org",
       "repo": "gstreamer/gst-plugins-rs"
-    },   
-    "plymouth": {
+    },
+    "gstreamer": {
       "host": "gitlab.freedesktop.org",
-      "repo": "plymouth/plymouth"
-    },   
-    "kdenlive": {
-      "host": "invent.kde.org",
-      "repo": "multimedia/kdenlive"
-    },
-    "kactivitymanagerd": {
-      "host": "invent.kde.org",
-      "repo": "plasma/kactivitymanagerd"
-    },
-    "karchive": {
-      "host": "invent.kde.org",
-      "repo": "frameworks/karchive"
-    },
-    "kcontacts": {
-      "host": "invent.kde.org",
-      "repo": "frameworks/kcontacts"
-    },
-    "kdesu": {
-      "host": "invent.kde.org",
-      "repo": "frameworks/kdesu"
-    },
-    "kpipewire": {
-      "host": "invent.kde.org",
-      "repo": "plasma/kpipewire"
-    },
-    "kde-cli-tools": {
-      "host": "invent.kde.org",
-      "repo": "plasma/kde-cli-tools"
-    },
-    "discover": {
-      "host": "invent.kde.org",
-      "repo": "plasma/discover"
-    },
-    "kwin": {
-      "host": "invent.kde.org",
-      "repo": "plasma/kwin"
-    },
-    "kdecoration": {
-      "host": "invent.kde.org",
-      "repo": "plasma/kdecoration"
-    },
-    "plasma-desktop": {
-      "host": "invent.kde.org",
-      "repo": "plasma/plasma-desktop"
-    },
-    "latte-dock": {
-      "host": "invent.kde.org",
-      "repo": "plasma/latte-dock"
-    },
-    "xdg-desktop-portal-kde": {
-      "host": "invent.kde.org",
-      "repo": "plasma/xdg-desktop-portal-kde"
-    },
-    "smb4k": {
-      "host": "invent.kde.org",
-      "repo": "network/smb4k"
-    },
-    "gwenview": {
-      "host": "invent.kde.org",
-      "repo": "graphics/gwenview"
-    },
-    "tellico": {
-      "host": "invent.kde.org",
-      "repo": "office/tellico"
-    },
-    "calligra": {
-      "host": "invent.kde.org",
-      "repo": "office/calligra"
-    },
-    "optiimage": {
-      "host": "invent.kde.org",
-      "repo": "graphics/optiimage"
-    },
-    "kmymoney": {
-      "host": "invent.kde.org",
-      "repo": "office/kmymoney"
-    },
-    "skrooge": {
-      "host": "invent.kde.org",
-      "repo": "office/skrooge"
-    },
-    "krusader": {
-      "host": "invent.kde.org",
-      "repo": "utilities/krusader"
-    },
-    "amarok": {
-      "host": "invent.kde.org",
-      "repo": "multimedia/amarok"
-    },
-    "kid3": {
-      "host": "invent.kde.org",
-      "repo": "multimedia/kid3"
-    },
-    "elisa": {
-      "host": "invent.kde.org",
-      "repo": "multimedia/elisa"
-    },
-    "k3b": {
-      "host": "invent.kde.org",
-      "repo": "multimedia/k3b"
-    },
-    "juk": {
-      "host": "invent.kde.org",
-      "repo": "multimedia/juk"
+      "repo": "gstreamer/gstreamer"
     },
     "gthumb": {
       "host": "gitlab.gnome.org",
@@ -254,25 +171,137 @@
       "host": "gitlab.com",
       "repo": "inkscape/inkscape"
     },
+    "juk": {
+      "host": "invent.kde.org",
+      "repo": "multimedia/juk"
+    },
+    "k3b": {
+      "host": "invent.kde.org",
+      "repo": "multimedia/k3b"
+    },
+    "kactivitymanagerd": {
+      "host": "invent.kde.org",
+      "repo": "plasma/kactivitymanagerd"
+    },
+    "karchive": {
+      "host": "invent.kde.org",
+      "repo": "frameworks/karchive"
+    },
+    "kcontacts": {
+      "host": "invent.kde.org",
+      "repo": "frameworks/kcontacts"
+    },
+    "kde-cli-tools": {
+      "host": "invent.kde.org",
+      "repo": "plasma/kde-cli-tools"
+    },
+    "kdecoration": {
+      "host": "invent.kde.org",
+      "repo": "plasma/kdecoration"
+    },
+    "kdenlive": {
+      "host": "invent.kde.org",
+      "repo": "multimedia/kdenlive"
+    },
+    "kdesu": {
+      "host": "invent.kde.org",
+      "repo": "frameworks/kdesu"
+    },
+    "kid3": {
+      "host": "invent.kde.org",
+      "repo": "multimedia/kid3"
+    },
+    "kmymoney": {
+      "host": "invent.kde.org",
+      "repo": "office/kmymoney"
+    },
     "konsole": {
       "host": "invent.kde.org",
       "repo": "utilities/konsole"
+    },
+    "kpipewire": {
+      "host": "invent.kde.org",
+      "repo": "plasma/kpipewire"
+    },
+    "krusader": {
+      "host": "invent.kde.org",
+      "repo": "utilities/krusader"
+    },
+    "kwin": {
+      "host": "invent.kde.org",
+      "repo": "plasma/kwin"
+    },
+    "latte-dock": {
+      "host": "invent.kde.org",
+      "repo": "plasma/latte-dock"
+    },
+    "manjaro-gnome-settings": {
+      "host": "gitlab.manjaro.org",
+      "repo": "profiles-and-settings/manjaro-gnome-settings"
+    },
+    "manjaro-kde-settings": {
+      "host": "gitlab.manjaro.org",
+      "repo": "profiles-and-settings/manjaro-kde-settings"
+    },
+    "manjaro-settings-manager": {
+      "host": "gitlab.manjaro.org",
+      "repo": "applications/manjaro-settings-manager"
+    },
+    "mhwd": {
+      "host": "gitlab.manjaro.org",
+      "repo": "applications/mhwd"
     },
     "okular": {
       "host": "invent.kde.org",
       "repo": "graphics/okular"
     },
+    "optiimage": {
+      "host": "invent.kde.org",
+      "repo": "graphics/optiimage"
+    },
     "orca": {
       "host": "gitlab.gnome.org",
       "repo": "GNOME/orca"
+    },
+    "pacman-mirrors": {
+      "host": "gitlab.manjaro.org",
+      "repo": "applications/pacman-mirrors"
+    },
+    "plasma-desktop": {
+      "host": "invent.kde.org",
+      "repo": "plasma/plasma-desktop"
+    },
+    "plymouth": {
+      "host": "gitlab.freedesktop.org",
+      "repo": "plymouth/plymouth"
+    },
+    "qemu-base": {
+      "host": "gitlab.com",
+      "repo": "qemu-project/qemu"
+    },
+    "remmmina": {
+      "host": "gitlab.com",
+      "repo": "Remmina/Remmina"
     },
     "rhythmbox": {
       "host": "gitlab.gnome.org",
       "repo": "GNOME/rhythmbox"
     },
+    "skrooge": {
+      "host": "invent.kde.org",
+      "repo": "office/skrooge"
+    },
+    "smb4k": {
+      "host": "invent.kde.org",
+      "repo": "network/smb4k"
+    },
     "spectacle": {
       "host": "invent.kde.org",
       "repo": "graphics/spectacle"
+    },
+    "tellico": {
+      "host": "invent.kde.org",
+      "repo": "office/tellico"
     },
     "wine": {
       "host": "gitlab.winehq.org",
@@ -282,48 +311,15 @@
       "host": "gitlab.winehq.org",
       "repo": "mono/wine-mono"
     },
-    "remmmina": {
-      "host": "gitlab.com",
-      "repo": "Remmina/Remmina"
-    },    
-    "qemu-base": {
-      "host": "gitlab.com",
-      "repo": "qemu-project/qemu"
-    },      
-    "gimp": {
-      "host": "gitlab.gnome.org",
-      "repo": "GNOME/gimp"
-    },  
-    "gnome-console": {
-      "host": "gitlab.gnome.org",
-      "repo": "GNOME/console"
-    },    
-    "manjaro-settings-manager": {
-      "host": "gitlab.manjaro.org",
-      "repo": "applications/manjaro-settings-manager"
-    },   
-    "manjaro-gnome-settings": {
-      "host": "gitlab.manjaro.org",
-      "repo": "profiles-and-settings/manjaro-gnome-settings"
-    },    
-    "manjaro-kde-settings": {
-      "host": "gitlab.manjaro.org",
-      "repo": "profiles-and-settings/manjaro-kde-settings"
-    },       
-    "pacman-mirrors": {
-      "host": "gitlab.manjaro.org",
-      "repo": "applications/pacman-mirrors"
-    },          
-    "mhwd": {
-      "host": "gitlab.manjaro.org",
-      "repo": "applications/mhwd"
-    },        
     "wireshark": {
       "host": "gitlab.com",
       "repo": "wireshark/wireshark"
+    },
+    "xdg-desktop-portal-kde": {
+      "host": "invent.kde.org",
+      "repo": "plasma/xdg-desktop-portal-kde"
     }
   },
-
   "release_pages": {
     "blender": "https://www.blender.org/download/releases",
     "chromium": "https://chromereleases.googleblog.com/search/label/Stable%20updates",
@@ -347,5 +343,5 @@
     "virtualbox": "https://www.virtualbox.org/wiki/Changelog",
     "vlc": "https://www.videolan.org/vlc/releases/"
   },
-  "total_packages": 1
+  "total_packages": 151
 }
