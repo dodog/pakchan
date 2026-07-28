@@ -222,9 +222,7 @@
                         <option value="github_releases">GitHub Releases</option>
                         <option value="gitlab_releases">GitLab Releases</option>
                         <option value="html_page">Release Notes Page (HTML)</option>
-                        <option value="mozilla_releases">Mozilla Release Notes</option>
                         <option value="text_file">Plain Text File</option>
-                        <option value="other">Other URL</option>
                     </select>
                 </div>
 
@@ -273,7 +271,7 @@
             document.getElementById('fieldGithub').style.display = type === 'github_releases' ? 'block' : 'none';
             document.getElementById('fieldGitlab').style.display = type === 'gitlab_releases' ? 'block' : 'none';
             document.getElementById('fieldGitlabRepo').style.display = type === 'gitlab_releases' ? 'block' : 'none';
-            document.getElementById('fieldUrl').style.display = ['html_page', 'mozilla_releases', 'text_file', 'other'].includes(type) ? 'block' : 'none';
+            document.getElementById('fieldUrl').style.display = ['html_page', 'text_file'].includes(type) ? 'block' : 'none';
         });
 
         // Load stats
@@ -309,9 +307,9 @@
                 return { type: 'custom', value: { parser: 'text_file', url } };
             }
 
-            // html_page, mozilla_releases, other -> all land in release_pages as a plain URL
+            // html_page -> release_pages as a plain URL
             const url = document.querySelector('#fieldUrl input').value.trim();
-            if (!url) return { error: 'Please enter a URL' };
+            if (!url) return { error: 'Please enter a URL for the release notes page' };
             return { type: 'release_pages', value: url };
         }
 
