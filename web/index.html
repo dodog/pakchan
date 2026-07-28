@@ -274,11 +274,19 @@
             document.getElementById('fieldUrl').style.display = ['html_page', 'text_file'].includes(type) ? 'block' : 'none';
         });
 
-        // Load stats
+        // Load stats -- count live from the actual sections rather than trusting the
+        // stored total_packages field, since that field only gets recalculated by the
+        // submission workflow and drifts out of sync after manual edits to mappings.json.
         fetch(MAPPINGS_URL)
             .then(r => r.json())
             .then(data => {
-                document.getElementById('packageCount').textContent = data.total_packages || 0;
+                const names = new Set();
+                for (const section of MAPPING_SECTIONS) {
+                    for (const name of Object.keys(data[section] || {})) {
+                        names.add(name);
+                    }
+                }
+                document.getElementById('packageCount').textContent = names.size;
             })
             .catch(() => {
                 document.getElementById('packageCount').textContent = 'many';
