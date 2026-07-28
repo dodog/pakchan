@@ -3,6 +3,13 @@ description: Submit a new package's changelog source
 title: "Add: "
 labels: ["submission"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        💡 **Prefer the [web form](https://dodog.github.io/pakchan/web/)** — it builds the
+        submission for you and validates it before opening the issue. Only fill this out by
+        hand if you can't use the form for some reason.
+
   - type: input
     id: package_name
     attributes:
@@ -11,59 +18,37 @@ body:
       placeholder: e.g., vlc, firefox, gimp
     validations:
       required: true
-      
-  - type: input
-    id: display_name
-    attributes:
-      label: Display Name
-      description: Human-readable name (optional)
-      placeholder: e.g., VLC Media Player
-      
-  - type: input
-    id: homepage
-    attributes:
-      label: Homepage URL
-      placeholder: https://example.com
-      
-  - type: dropdown
-    id: category
-    attributes:
-      label: Category
-      options:
-        - Multimedia
-        - Office/Productivity
-        - Graphics/Design
-        - Browser/Internet
-        - Communication
-        - Development
-        - System/Tools
-        - Games
-        - Security
-        - Other
-        
+
   - type: input
     id: github_repo
     attributes:
       label: GitHub Repository (if applicable)
-      description: owner/repository format
+      description: owner/repo format — no URL, no trailing slash
       placeholder: videolan/vlc
-      
+
+  - type: input
+    id: gitlab_host
+    attributes:
+      label: GitLab Host (if applicable)
+      description: Domain only — no https:// and no trailing slash
+      placeholder: gitlab.gnome.org
+
   - type: input
     id: gitlab_repo
     attributes:
-      label: GitLab Repository (if applicable)
-      description: host and repository path
-      placeholder: gitlab.gnome.org/GNOME/gimp
-      
+      label: GitLab Repository Path (if applicable)
+      description: group/project format — no trailing slash
+      placeholder: GNOME/gimp
+
   - type: input
     id: release_notes_url
     attributes:
-      label: Release Notes URL
-      description: Direct URL to release notes/changelog page
+      label: Release Notes / Text File URL (if no GitHub/GitLab source)
+      description: Direct link to a changelog, release notes page, or plain text changelog file
       placeholder: https://example.com/releases
-      
+
   - type: textarea
     id: additional_notes
     attributes:
       label: Additional Notes
-      description: Any special instructions for parsing this package's changelog
+      description: Anything a maintainer should know before adding this
