@@ -81,6 +81,34 @@ jobs:
               print(f"ERROR: Unknown type '{section}'. Must be one of {valid_sections}")
               sys.exit(1)
 
+          # Normalize github/gitlab values regardless of what the form sent, in case an
+          # issue was hand-edited or came from a cached/older version of the form: strip
+          # protocol, leading/trailing slashes, and a trailing .git.
+          def normalize_github_repo(repo):
+              repo = repo.strip()
+              repo = re.sub(r'^https?://(www\.)?github\.com/', '', repo, flags=re.IGNORECASE)
+              repo = re.sub(r'\.git$', '', repo, flags=re.IGNORECASE)
+              return repo.strip('/')
+
+          def normalize_gitlab_host(host):
+              host = host.strip()
+              host = re.sub(r'^https?://', '', host, flags=re.IGNORECASE)
+              return host.strip('/')
+
+          def normalize_gitlab_repo(repo):
+              repo = repo.strip()
+              repo = re.sub(r'^https?://[^/]+/', '', repo, flags=re.IGNORECASE)
+              repo = re.sub(r'\.git$', '', repo, flags=re.IGNORECASE)
+              return repo.strip('/')
+
+          if section == 'github' and isinstance(value, str):
+              value = normalize_github_repo(value)
+          elif section == 'gitlab' and isinstance(value, dict):
+              if 'host' in value and isinstance(value['host'], str):
+                  value['host'] = normalize_gitlab_host(value['host'])
+              if 'repo' in value and isinstance(value['repo'], str):
+                  value['repo'] = normalize_gitlab_repo(value['repo'])
+
           # Type-specific shape validation, matching mappings.json's schema
           if section == 'github':
               if not isinstance(value, str) or '/' not in value:
