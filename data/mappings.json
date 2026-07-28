@@ -235,6 +235,10 @@
       "host": "invent.kde.org",
       "repo": "plasma/latte-dock"
     },
+    "libadwaita": {
+      "host": "gitlab.gnome.org",
+      "repo": "GNOME/libadwaita"
+    },
     "manjaro-gnome-settings": {
       "host": "gitlab.manjaro.org",
       "repo": "profiles-and-settings/manjaro-gnome-settings"
@@ -343,5 +347,5 @@
     "virtualbox": "https://www.virtualbox.org/wiki/Changelog",
     "vlc": "https://www.videolan.org/vlc/releases/"
   },
-  "total_packages": 151
+  "total_packages": 152
 }
