@@ -1,0 +1,76 @@
+name: Validate Submission
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  validate:
+    if: contains(github.event.issue.labels.*.name, 'submission')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+
+    steps:
+      - name: Check submission JSON
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          python3 << 'PYEOF'
+          import json, os, re
+
+          body = os.environ.get('ISSUE_BODY', '')
+          errors = []
+
+          json_match = re.search(r'```json\s*(.*?)```', body, re.DOTALL)
+          submission = None
+          if json_match:
+              try:
+                  submission = json.loads(json_match.group(1).strip())
+              except json.JSONDecodeError as e:
+                  errors.append(f"JSON block does not parse: {e}")
+          else:
+              errors.append("No ```json code block found in the issue body.")
+
+          if submission is not None:
+              for key in ('package_name', 'type', 'value'):
+                  if key not in submission:
+                      errors.append(f"Missing required field: '{key}'")
+
+              valid_sections = ('github', 'gitlab', 'custom', 'release_pages')
+              section = submission.get('type')
+              if section is not None and section not in valid_sections:
+                  errors.append(f"'type' must be one of {valid_sections}, got '{section}'")
+
+          with open('/tmp/errors.txt', 'w') as f:
+              f.write('\n'.join(errors))
+          PYEOF
+
+      - name: Comment result
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const errors = fs.readFileSync('/tmp/errors.txt', 'utf8').trim();
+
+            if (errors) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                labels: ['validation-failed']
+              });
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: `❌ **Automatic validation failed**\n\n${errors.split('\n').map(e => `- ${e}`).join('\n')}\n\nA maintainer will still take a look, but please check the submission if possible.`
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: '✅ **Submission looks well-formed.** A maintainer will review it and add the `validated` label to merge it into the database.'
+              });
+            }
