@@ -6,22 +6,24 @@ on:
 
 jobs:
   process:
-    # Only run when 'submission' or 'validated' label is added
-    if: contains(fromJson('["submission", "validated"]'), github.event.label.name)
+    # Only run once a maintainer adds the 'validated' label -- NOT on 'submission',
+    # which is applied automatically when the issue is opened. This is what actually
+    # enforces "maintainer reviews, then it gets added" instead of auto-merging on open.
+    if: github.event.label.name == 'validated'
     runs-on: ubuntu-latest
     permissions:
       issues: write
       contents: write
-    
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      
+
       - name: Process Submission
         env:
           ISSUE_BODY: ${{ github.event.issue.body }}
@@ -31,27 +33,24 @@ jobs:
           python3 << 'PYEOF'
           import json, os, re, sys
 
-          # Get the issue body from environment variable
           body = os.environ.get('ISSUE_BODY', '')
           if not body:
               print("ERROR: No issue body provided")
               sys.exit(1)
-          
+
           print(f"DEBUG: Issue body length: {len(body)}")
-          
-          # Try multiple patterns to extract JSON
+
+          # Extract the JSON block from the issue body
           submission = None
-          
-          # Pattern 1: Code fences with json marker (flexible whitespace)
+
           json_match = re.search(r'```json\s*(.*?)```', body, re.DOTALL)
           if json_match:
               try:
                   submission = json.loads(json_match.group(1).strip())
                   print("DEBUG: Found JSON in code fence")
               except json.JSONDecodeError as e:
-                  print(f"DEBUG: Pattern 1 failed: {e}")
-          
-          # Pattern 2: Just code fences
+                  print(f"DEBUG: json-fence parse failed: {e}")
+
           if not submission:
               json_match = re.search(r'```\s*(\{.*?\})\s*```', body, re.DOTALL)
               if json_match:
@@ -59,72 +58,77 @@ jobs:
                       submission = json.loads(json_match.group(1).strip())
                       print("DEBUG: Found JSON in plain code fence")
                   except json.JSONDecodeError as e:
-                      print(f"DEBUG: Pattern 2 failed: {e}")
-          
-          # Pattern 3: Look for JSON object directly
+                      print(f"DEBUG: plain-fence parse failed: {e}")
+
           if not submission:
-              json_match = re.search(r'(\{[^{}]*"package_name"[^{}]*\})', body, re.DOTALL)
-              if json_match:
-                  try:
-                      submission = json.loads(json_match.group(1).strip())
-                      print("DEBUG: Found JSON object directly")
-                  except json.JSONDecodeError as e:
-                      print(f"DEBUG: Pattern 3 failed: {e}")
-          
-          if not submission:
-              print(f"ERROR: Could not find JSON block in issue body")
+              print("ERROR: Could not find a JSON block in the issue body")
               print(f"DEBUG: Body preview: {body[:800]}")
               sys.exit(1)
-          
-          # Extract package name and sources from submission
-          if 'package_name' not in submission or 'sources' not in submission:
-              print("ERROR: Missing package_name or sources in submission")
+
+          # Validate required fields
+          required = ('package_name', 'type', 'value')
+          missing = [k for k in required if k not in submission]
+          if missing:
+              print(f"ERROR: Submission missing required fields: {missing}")
               sys.exit(1)
-          
-          pkg_name = submission['package_name'].lower().strip()
-          sources = submission['sources']
-          
+
+          pkg_name = str(submission['package_name']).strip().lower()
+          section = str(submission['type']).strip().lower()
+          value = submission['value']
+
+          valid_sections = ('github', 'gitlab', 'custom', 'release_pages')
+          if section not in valid_sections:
+              print(f"ERROR: Unknown type '{section}'. Must be one of {valid_sections}")
+              sys.exit(1)
+
+          # Type-specific shape validation, matching mappings.json's schema
+          if section == 'github':
+              if not isinstance(value, str) or '/' not in value:
+                  print("ERROR: 'github' value must be an 'owner/repo' string")
+                  sys.exit(1)
+          elif section == 'gitlab':
+              if not isinstance(value, dict) or 'host' not in value or 'repo' not in value:
+                  print("ERROR: 'gitlab' value must be an object with 'host' and 'repo'")
+                  sys.exit(1)
+          elif section == 'release_pages':
+              if not isinstance(value, str):
+                  print("ERROR: 'release_pages' value must be a URL string")
+                  sys.exit(1)
+          elif section == 'custom':
+              if not isinstance(value, dict) or 'parser' not in value or 'url' not in value:
+                  print("ERROR: 'custom' value must be an object with 'parser' and 'url'")
+                  sys.exit(1)
+
           print(f"Package: {pkg_name}")
-          print(f"Sources: {sources}")
-          
-          # Load current mappings
+          print(f"Section: {section}")
+          print(f"Value: {value}")
+
           with open('data/mappings.json') as f:
               mappings = json.load(f)
-          
-          # Ensure 'packages' key exists
-          if 'packages' not in mappings:
-              mappings['packages'] = {}
-          
-          # Check if package already exists
-          if pkg_name in mappings['packages']:
-              print(f"ERROR: Package {pkg_name} already exists in mappings")
-              sys.exit(1)
-          
-          # Add the package with its sources
-          mappings['packages'][pkg_name] = {
-              'name': pkg_name,
-              'sources': sources
-          }
-          
-          # Update total count
-          mappings['total_packages'] = len(mappings['packages'])
 
+          for sec in valid_sections:
+              mappings.setdefault(sec, {})
 
+          # Check for duplicates across every section, not just the target one
+          for sec in valid_sections:
+              if pkg_name in mappings[sec]:
+                  print(f"ERROR: Package '{pkg_name}' already exists under '{sec}'")
+                  sys.exit(1)
 
-          
-                
-          # Save
+          mappings[section][pkg_name] = value
+          mappings['total_packages'] = sum(len(mappings[sec]) for sec in valid_sections)
+
           with open('data/mappings.json', 'w') as f:
               json.dump(mappings, f, indent=2, sort_keys=True)
-          
-          print(f"✓ Added {pkg_name} to mappings")
+              f.write('\n')
+
+          print(f"✓ Added {pkg_name} to '{section}'")
           print(f"  Total packages: {mappings['total_packages']}")
-          
-          # Save package name for commit message
+
           with open('/tmp/pkg_name.txt', 'w') as f:
               f.write(pkg_name)
           PYEOF
-      
+
       - name: Commit and Push
         run: |
           PKG_NAME=$(cat /tmp/pkg_name.txt)
@@ -133,48 +137,44 @@ jobs:
           git add data/mappings.json
           git diff --staged --quiet || git commit -m "Add ${PKG_NAME} from issue #${{ github.event.issue.number }}"
           git push
-      
+
       - name: Comment on Issue
         if: success()
         uses: actions/github-script@v7
         with:
           script: |
             const pkgName = require('fs').readFileSync('/tmp/pkg_name.txt', 'utf8').trim();
-            
-            // Add 'added' label
+
             await github.rest.issues.addLabels({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
               labels: ['added']
             });
-            
-            // Remove 'validated' label (optional)
+
             try {
               await github.rest.issues.removeLabel({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: context.issue.number,
-                name: 'validated'
+                name: 'submission'
               });
             } catch(e) {}
-            
-            // Post success comment
+
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
               body: `✅ **Added to the database!**\n\nPackage \`${pkgName}\` is now available in Pakchan.\n\nThank you for your contribution! 🎉`
             });
-            
-            // Close the issue
+
             await github.rest.issues.update({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
               state: 'closed'
             });
-      
+
       - name: Comment on Failure
         if: failure()
         uses: actions/github-script@v7
@@ -184,5 +184,5 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: '❌ **Failed to process this submission.**\n\nPlease check the JSON format in the issue body. It should contain a valid JSON block with `package_name` and `sources`.'
+              body: '❌ **Failed to process this submission.**\n\nPlease check the JSON block in the issue body. It must contain `package_name`, `type` (one of `github`, `gitlab`, `custom`, `release_pages`), and `value` in the shape that section expects.'
             });
