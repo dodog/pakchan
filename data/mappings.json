@@ -18,10 +18,6 @@
       "parser": "text_file",
       "url": "https://codeberg.org/mbunkus/mkvtoolnix/raw/branch/main/NEWS.md"
     },
-    "scribus": {
-      "parser": "mantisbt",
-      "url": "https://bugs.scribus.net/changelog_page.php"
-    },
     "xnviewmp": {
       "parser": "mantisbt",
       "url": "https://www.xnview.com/mantisbt/changelog_page.php"
@@ -61,7 +57,6 @@
     "handbrake": "HandBrake/HandBrake",
     "helix": "helix-editor/helix",
     "htop": "htop-dev/htop",
-    "kdenlive": "KDE/kdenlive",
     "keepassxc": "keepassxreboot/keepassxc",
     "kitty": "kovidgoyal/kitty",
     "less": "gwsw/less",
@@ -303,10 +298,6 @@
       "host": "invent.kde.org",
       "repo": "graphics/spectacle"
     },
-    "tellico": {
-      "host": "invent.kde.org",
-      "repo": "office/tellico"
-    },
     "wine": {
       "host": "gitlab.winehq.org",
       "repo": "wine/wine"
@@ -341,7 +332,7 @@
     "php": "https://www.php.net/ChangeLog-8.php/",
     "python": "https://docs.python.org/3/whatsnew/",
     "samba": "https://www.samba.org/samba/history/",
-    "scribus": "https://bugs.scribus.net/changelog_page.php",
+    "scribus": "https://www.scribus.net/news",
     "tellico": "https://tellico-project.org/tellico-changelog/",
     "thunderbird": "https://www.thunderbird.net/en-US/thunderbird/releases/",
     "virtualbox": "https://www.virtualbox.org/wiki/Changelog",
