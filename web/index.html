@@ -192,7 +192,7 @@
 
         <header>
             <h1>📦 Pakchan</h1>
-            <p>Add a package's changelog source for Pakchan</p>
+            <p>Add a package's changelog source for Pakku</p>
             <div class="nav">
                 <a href="packages.html">Browse Packages →</a>
                 <a href="https://github.com/dodog/pakchan">GitHub</a>
@@ -284,18 +284,43 @@
                 document.getElementById('packageCount').textContent = 'many';
             });
 
+        // Strip protocol, leading/trailing slashes, and a trailing .git so people can
+        // paste a full URL and still end up with a clean owner/repo or host value.
+        function normalizeGithubRepo(repo) {
+            let r = repo.trim();
+            r = r.replace(/^https?:\/\/(www\.)?github\.com\//i, '');
+            r = r.replace(/\.git$/i, '');
+            r = r.replace(/^\/+|\/+$/g, '');
+            return r;
+        }
+
+        function normalizeGitlabHost(host) {
+            let h = host.trim();
+            h = h.replace(/^https?:\/\//i, '');
+            h = h.replace(/^\/+|\/+$/g, '');
+            return h;
+        }
+
+        function normalizeGitlabRepo(repo) {
+            let r = repo.trim();
+            r = r.replace(/^https?:\/\/[^/]+\//i, ''); // in case a full URL was pasted
+            r = r.replace(/\.git$/i, '');
+            r = r.replace(/^\/+|\/+$/g, '');
+            return r;
+        }
+
         // Given a source type + form inputs, build {type, value} matching mappings.json's schema
         function buildSubmission(packageName, sourceType) {
             if (sourceType === 'github_releases') {
-                const repo = document.querySelector('#fieldGithub input').value.trim();
+                const repo = normalizeGithubRepo(document.querySelector('#fieldGithub input').value);
                 if (!repo) return { error: 'Please enter a GitHub repository (owner/repo)' };
                 if (!repo.includes('/')) return { error: 'GitHub repository must be in owner/repo format' };
                 return { type: 'github', value: repo };
             }
 
             if (sourceType === 'gitlab_releases') {
-                const host = document.querySelector('#fieldGitlab input').value.trim();
-                const repo = document.querySelector('#fieldGitlabRepo input').value.trim();
+                const host = normalizeGitlabHost(document.querySelector('#fieldGitlab input').value);
+                const repo = normalizeGitlabRepo(document.querySelector('#fieldGitlabRepo input').value);
                 if (!host) return { error: 'Please enter a GitLab host' };
                 if (!repo) return { error: 'Please enter a GitLab repository path' };
                 return { type: 'gitlab', value: { host, repo } };
