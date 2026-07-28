@@ -21,6 +21,7 @@ jobs:
 
           body = os.environ.get('ISSUE_BODY', '')
           errors = []
+          notes = []
 
           json_match = re.search(r'```json\s*(.*?)```', body, re.DOTALL)
           submission = None
@@ -42,8 +43,21 @@ jobs:
               if section is not None and section not in valid_sections:
                   errors.append(f"'type' must be one of {valid_sections}, got '{section}'")
 
+              # Non-blocking heads-up only -- process-submission.yml normalizes these
+              # automatically, so this doesn't count as a validation failure.
+              value = submission.get('value')
+              if section == 'github' and isinstance(value, str):
+                  if value.startswith('http') or value.endswith('/') or value.endswith('.git'):
+                      notes.append(f"github value '{value}' will be auto-normalized to a clean owner/repo before merging")
+              if section == 'gitlab' and isinstance(value, dict):
+                  host, repo = value.get('host', ''), value.get('repo', '')
+                  if host.startswith('http') or host.endswith('/') or repo.endswith('/') or repo.endswith('.git'):
+                      notes.append("gitlab host/repo will be auto-normalized (protocol/trailing slashes stripped) before merging")
+
           with open('/tmp/errors.txt', 'w') as f:
               f.write('\n'.join(errors))
+          with open('/tmp/notes.txt', 'w') as f:
+              f.write('\n'.join(notes))
           PYEOF
 
       - name: Comment result
@@ -52,6 +66,7 @@ jobs:
           script: |
             const fs = require('fs');
             const errors = fs.readFileSync('/tmp/errors.txt', 'utf8').trim();
+            const notes = fs.readFileSync('/tmp/notes.txt', 'utf8').trim();
 
             if (errors) {
               await github.rest.issues.addLabels({
@@ -67,10 +82,11 @@ jobs:
                 body: `❌ **Automatic validation failed**\n\n${errors.split('\n').map(e => `- ${e}`).join('\n')}\n\nA maintainer will still take a look, but please check the submission if possible.`
               });
             } else {
+              const notesBlock = notes ? `\n\n${notes.split('\n').map(n => `- ℹ️ ${n}`).join('\n')}` : '';
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: context.issue.number,
-                body: '✅ **Submission looks well-formed.** A maintainer will review it and add the `validated` label to merge it into the database.'
+                body: `✅ **Submission looks well-formed.** A maintainer will review it and add the \`validated\` label to merge it into the database.${notesBlock}`
               });
             }
