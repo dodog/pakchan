@@ -90,3 +90,4 @@ jobs:
                 body: `✅ **Submission looks well-formed.** A maintainer will review it and add the \`validated\` label to merge it into the database.${notesBlock}`
               });
             }
+
