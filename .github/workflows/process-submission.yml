@@ -2,14 +2,17 @@ name: Process Submission
 
 on:
   issues:
-    types: [labeled]
+    types: [opened, labeled]
 
 jobs:
   process:
     # Only run once a maintainer adds the 'validated' label -- NOT on 'submission',
     # which is applied automatically when the issue is opened. This is what actually
     # enforces "maintainer reviews, then it gets added" instead of auto-merging on open.
-    if: github.event.label.name == 'validated'
+    # Use contains(...) against the issue's labels so this runs both when:
+    # - the 'validated' label is added (labeled event), and
+    # - an issue is opened that already includes the 'validated' label (opened event).
+    if: contains(github.event.issue.labels.*.name, 'validated')
     runs-on: ubuntu-latest
     permissions:
       issues: write
@@ -212,5 +215,5 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: '❌ **Failed to process this submission.**\n\nPlease check the JSON block in the issue body. It must contain `package_name`, `type` (one of `github`, `gitlab`, `custom`, `release_pages`), and `value` in the shape that section expects.'
+              body: '❌ **Failed to process this submission.**\n\nPlease check the JSON block in the issue body. It must contain `package_name`, `type` (one of `github`, `gitlab`, `custom`, `release_pages`), and `value`.'
             });
