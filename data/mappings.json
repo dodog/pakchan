@@ -102,6 +102,10 @@
       "host": "invent.kde.org",
       "repo": "office/calligra"
     },
+    "cmake": {
+      "host": "gitlab.kitware.com",
+      "repo": "cmake/cmake"
+    },
     "digikam": {
       "host": "invent.kde.org",
       "repo": "graphics/digikam"
@@ -338,5 +342,5 @@
     "virtualbox": "https://www.virtualbox.org/wiki/Changelog",
     "vlc": "https://www.videolan.org/vlc/releases/"
   },
-  "total_packages": 152
+  "total_packages": 150
 }
