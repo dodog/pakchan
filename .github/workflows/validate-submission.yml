@@ -2,41 +2,19 @@ name: Validate Submission
 
 on:
   issues:
-    types: [opened, labeled]
-  workflow_dispatch:
-    inputs:
-      issue_number:
-        description: 'Issue number to validate (for cases where the issues event never dispatched)'
-        required: true
-        type: number
+    types: [opened]
 
 jobs:
   validate:
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.issue.labels.*.name, 'submission')
+    if: contains(github.event.issue.labels.*.name, 'submission')
     runs-on: ubuntu-latest
     permissions:
       issues: write
 
     steps:
-      - name: Resolve issue number and body
-        id: issue
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const number = context.eventName === 'workflow_dispatch'
-              ? Number(core.getInput('issue_number') || context.payload.inputs.issue_number)
-              : context.issue.number;
-            const { data: issue } = await github.rest.issues.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: number
-            });
-            core.setOutput('number', number);
-            core.exportVariable('ISSUE_BODY', issue.body || '');
-
       - name: Check submission JSON
         env:
-          ISSUE_BODY: ${{ env.ISSUE_BODY }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
         run: |
           python3 << 'PYEOF'
           import json, os, re
@@ -65,6 +43,8 @@ jobs:
               if section is not None and section not in valid_sections:
                   errors.append(f"'type' must be one of {valid_sections}, got '{section}'")
 
+              # Non-blocking heads-up only -- process-submission.yml normalizes these
+              # automatically, so this doesn't count as a validation failure.
               value = submission.get('value')
               if section == 'github' and isinstance(value, str):
                   if value.startswith('http') or value.endswith('/') or value.endswith('.git'):
@@ -87,19 +67,18 @@ jobs:
             const fs = require('fs');
             const errors = fs.readFileSync('/tmp/errors.txt', 'utf8').trim();
             const notes = fs.readFileSync('/tmp/notes.txt', 'utf8').trim();
-            const issue_number = ${{ steps.issue.outputs.number }};
 
             if (errors) {
               await github.rest.issues.addLabels({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                issue_number,
+                issue_number: context.issue.number,
                 labels: ['validation-failed']
               });
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                issue_number,
+                issue_number: context.issue.number,
                 body: `❌ **Automatic validation failed**\n\n${errors.split('\n').map(e => `- ${e}`).join('\n')}\n\nA maintainer will still take a look, but please check the submission if possible.`
               });
             } else {
@@ -107,7 +86,7 @@ jobs:
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                issue_number,
+                issue_number: context.issue.number,
                 body: `✅ **Submission looks well-formed.** A maintainer will review it and add the \`validated\` label to merge it into the database.${notesBlock}`
               });
             }
