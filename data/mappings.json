@@ -48,6 +48,7 @@
     "fastfetch": "fastfetch-cli/fastfetch",
     "ffmpeg": "FFmpeg/FFmpeg",
     "flameshot": "flameshot-org/flameshot",
+    "gdal": "OSGeo/gdal",
     "gdm-settings": "gdm-settings/gdm-settings",
     "git": "git/git",
     "gnucash": "Gnucash/gnucash",
@@ -342,5 +343,5 @@
     "virtualbox": "https://www.virtualbox.org/wiki/Changelog",
     "vlc": "https://www.videolan.org/vlc/releases/"
   },
-  "total_packages": 150
+  "total_packages": 151
 }
