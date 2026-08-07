@@ -345,6 +345,14 @@
       "host": "gitlab.freedesktop.org",
       "repo": "spice/spice"
     },
+    "spice-gtk": {
+      "host": "gitlab.freedesktop.org",
+      "repo": "spice/spice-gtk"
+    },
+    "spice-protocol": {
+      "host": "gitlab.freedesktop.org",
+      "repo": "spice/spice-protocol"
+    },
     "wine": {
       "host": "gitlab.winehq.org",
       "repo": "wine/wine"
