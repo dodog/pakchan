@@ -333,7 +333,7 @@
       "host": "invent.kde.org",
       "repo": "plasma/kglobalacceld"
     },
-    "spectacle": {
+    "archlinux-appstream-data": {
       "host": "gitlab.archlinux.org",
       "repo": "archlinux/packaging/packages/archlinux-appstream-data"
     },
