@@ -215,6 +215,10 @@
       "host": "invent.kde.org",
       "repo": "office/kmymoney"
     },
+    "knighttime": {
+      "host": "invent.kde.org",
+      "repo": "plasma/knighttime"
+    },
     "konsole": {
       "host": "invent.kde.org",
       "repo": "utilities/konsole"
@@ -343,5 +347,5 @@
     "virtualbox": "https://www.virtualbox.org/wiki/Changelog",
     "vlc": "https://www.videolan.org/vlc/releases/"
   },
-  "total_packages": 151
+  "total_packages": 152
 }
