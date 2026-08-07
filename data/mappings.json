@@ -91,6 +91,8 @@
     "vim": "vim/vim",
     "vscodium": "VSCodium/vscodium",
     "webcamoid": "webcamoid/webcamoid",
+    "arrow": "apache/arrow",
+    "imagemagick": "imagemagick/imagemagick",
     "zulucrypt": "mhogomchungu/zuluCrypt",
     "zulumount": "mhogomchungu/zuluCrypt"
   },
@@ -306,6 +308,42 @@
     "spectacle": {
       "host": "invent.kde.org",
       "repo": "graphics/spectacle"
+    },
+    "ksystemstats": {
+      "host": "invent.kde.org",
+      "repo": "plasma/ksystemstats"
+    },
+    "kscreenlocker": {
+      "host": "invent.kde.org",
+      "repo": "plasma/kscreenlocker"
+    },
+    "plasma-workspace": {
+      "host": "invent.kde.org",
+      "repo": "plasma/plasma-workspace"
+    },
+    "kid3": {
+      "host": "invent.kde.org",
+      "repo": "multimedia/kid3/"
+    },
+    "kwayland": {
+      "host": "invent.kde.org",
+      "repo": "plasma/kwayland"
+    },
+    "kglobalacceld": {
+      "host": "invent.kde.org",
+      "repo": "plasma/kglobalacceld"
+    },
+    "spectacle": {
+      "host": "gitlab.archlinux.org",
+      "repo": "archlinux/packaging/packages/archlinux-appstream-data"
+    },
+    "pango": {
+      "host": "gitlab.gnome.org",
+      "repo": "GNOME/pango"
+    },
+    "spice": {
+      "host": "gitlab.freedesktop.org",
+      "repo": "spice/spice"
     },
     "wine": {
       "host": "gitlab.winehq.org",
