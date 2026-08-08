@@ -92,6 +92,7 @@
     "vscodium": "VSCodium/vscodium",
     "webcamoid": "webcamoid/webcamoid",
     "arrow": "apache/arrow",
+    "gmic": "GreycLab/gmic",
     "imagemagick": "imagemagick/imagemagick",
     "zulucrypt": "mhogomchungu/zuluCrypt",
     "zulumount": "mhogomchungu/zuluCrypt"
@@ -169,6 +170,10 @@
       "host": "invent.kde.org",
       "repo": "graphics/gwenview"
     },
+     "kio": {
+      "host": "invent.kde.org",
+      "repo": "frameworks/kio"
+    },   
     "inkscape": {
       "host": "gitlab.com",
       "repo": "inkscape/inkscape"
