@@ -353,6 +353,10 @@
       "host": "gitlab.freedesktop.org",
       "repo": "spice/spice-protocol"
     },
+    "nautilus": {
+      "host": "gitlab.gnome.org",
+      "repo": "GNOME/nautilus"
+    },    
     "wine": {
       "host": "gitlab.winehq.org",
       "repo": "wine/wine"
