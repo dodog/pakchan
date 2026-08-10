@@ -1,11 +1,11 @@
+
+[![GitHub Pages](https://img.shields.io/badge/Web%20Form-Live-brightgreen)](https://dodog.github.io/pakchan/web/)
+[![Packages](https://img.shields.io/badge/Packages-152-blue)](https://dodog.github.io/pakchan/data/mappings.json)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 # 📦 Pakchan
 
 Pakchan is a GTK4 package manager for Manjaro and Arch Linux based system that fetches **real changelogs** for package updates (Pacman, AUR, Flatpak, Snap). It also includes a community-driven changelog source database.
-
-[![GitHub Pages](https://img.shields.io/badge/Web%20Form-Live-brightgreen)](https://dodog.github.io/pakchan/web/)
-[![Packages](https://img.shields.io/badge/Packages-18-blue)](https://dodog.github.io/pakchan/data/mappings.json)
-[![Contributions Welcome](https://img.shields.io/badge/Contributions-Welcome-brightgreen.svg)](https://github.com/dodog/pakchan/issues)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 
 ## ❓ Why I created Pakchan
@@ -13,14 +13,14 @@ Pakchan is a GTK4 package manager for Manjaro and Arch Linux based system that f
 Most package managers tell you **an update exists**, but not **what changed**. I've always wondered what's new in the update.
 Pakchan solves this by locating and showing changelogs from actual upstream sources, including git tags, release notes pages, AUR commit history, and Flathub metadata.
 
-## Features
+## 🚀 Features
 
 - Changelog support for `pacman`, `aur`, `flatpak`, and `snap`
 - No API key required for supported sources
 - Community-maintained changelog mapping database
 - Web-based submission form for new mappings
 
-## Install dependencies
+## 🛠️ Install dependencies
 
 ```bash
 sudo pacman -S python-gobject gtk4 libadwaita pacman-contrib
@@ -53,11 +53,33 @@ flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.f
 python3 pakchan.py
 ```
 
+## Create a desktop launcher (optional)
+
+```bash
+cat > ~/.local/share/applications/pakchan.desktop << 'DESK'
+[Desktop Entry]
+Name=Pakchan
+Comment=Package manager with changelogs
+Exec=python3 /path/to/pakchan.py
+Icon=system-software-update
+Terminal=false
+Type=Application
+Categories=System;PackageManager;
+DESK
+```
+
 ---
 
-## How changelogs work
+---
 
-Pakchan resolves changelogs using a layered, source-aware process rather than relying on a single package metadata field.
+## ⚙️ How changelogs work
+
+Pakchan resolves changelogs using a layered, source-aware process rather than relying on a single package metadata field. Plus Pakchan stores changelog source mappings in `data/mappings.json`, which is consumed by the app to resolve the correct source for each package.
+
+### Add a package mapping
+
+- Use the [web form](https://dodog.github.io/pakchan/web/) to submit a package and changelog source.
+- Or open a GitHub issue: [Create an issue](https://github.com/dodog/pakchan/issues/new?labels=submission&template=add-package.yml).
 
 ### General strategy
 
@@ -112,25 +134,6 @@ For packages with edge-case sources, Pakchan can use custom parser types like:
 These custom entries are defined in `data/mappings.json` and let Pakchan interpret release notes that standard parsing would miss.
                                                                                                                                                   
 
----
-
-## Create a desktop launcher (optional)
-
-```bash
-cat > ~/.local/share/applications/pakchan.desktop << 'DESK'
-[Desktop Entry]
-Name=Pakchan
-Comment=Package manager with changelogs
-Exec=python3 /path/to/pakchan.py
-Icon=system-software-update
-Terminal=false
-Type=Application
-Categories=System;PackageManager;
-DESK
-```
-
----
-
 ## Troubleshooting
 
 **No updates show up?**
@@ -151,16 +154,10 @@ sudo pacman -S python-gobject gtk4 libadwaita
 
 ---
 
-## Package mapping database
-
-Pakchan stores changelog source mappings in `data/mappings.json`, which is consumed by the app to resolve the correct source for each package.
-
-### Add a package mapping
-
-- Use the [web form](https://dodog.github.io/pakchan/web/) to submit a package and changelog source.
-- Or open a GitHub issue: [Create an issue](https://github.com/dodog/pakchan/issues/new?labels=submission&template=add-package.yml).
 
 
+## ❤️ Support
+Do you find Pakchan useful? You can buy me a [coffee ☕](https://ko-fi.com/dodog)
 
 ## License
 
