@@ -361,7 +361,11 @@
     "nautilus": {
       "host": "gitlab.gnome.org",
       "repo": "GNOME/nautilus"
-    },    
+    },   
+    "mousepad": {
+      "host": "gitlab.xfce.org",
+      "repo": "apps/mousepad"
+    },       
     "wine": {
       "host": "gitlab.winehq.org",
       "repo": "wine/wine"
