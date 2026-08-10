@@ -1,20 +1,16 @@
 # 📦 Pakchan
 
-Pakchan is a GTK4 package manager for Manjaro/Arch Linux that shows real changelogs for Pacman, AUR, Flatpak, and Snap.
-It also includes a community-maintained changelog source database for Pakchan itself.
+Pakchan is a GTK4 package manager for Manjaro and Arch Linux based system that fetches **real changelogs** for package updates (Pacman, AUR, Flatpak, Snap). It also includes a community-driven changelog source database.
 
 [![GitHub Pages](https://img.shields.io/badge/Web%20Form-Live-brightgreen)](https://dodog.github.io/pakchan/web/)
 [![Packages](https://img.shields.io/badge/Packages-18-blue)](https://dodog.github.io/pakchan/data/mappings.json)
 [![Contributions Welcome](https://img.shields.io/badge/Contributions-Welcome-brightgreen.svg)](https://github.com/dodog/pakchan/issues)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## What is Pakchan?
 
-Pakchan is a desktop application for Manjaro/Arch that fetches **real changelogs** for package updates with its own community-driven changelog source database, so changelog sources can be discovered reliably.
+## ❓ Why I created Pakchan
 
-## Why it exists
-
-Most package managers tell you **an update exists**, but not **what changed**.
+Most package managers tell you **an update exists**, but not **what changed**. I've always wondered what's new in the update.
 Pakchan solves this by locating and showing changelogs from actual upstream sources, including git tags, release notes pages, AUR commit history, and Flathub metadata.
 
 ## Features
@@ -108,13 +104,12 @@ AUR fallback data is treated as packaging commit history, not the upstream proje
 For packages with edge-case sources, Pakchan can use custom parser types like:
 
 - `mozilla` for Mozilla-style release pages
-- `krita` for Krita release post pages
 - `mantisbt` for MantisBT changelog pages
 - `filezilla` for FileZilla news feeds
 - `text_file` for plain text changelog files
 - `github_raw` for raw GitHub changelog files like `CHANGELOG.md`
 
-These custom entries are defined in `data/mappings.json` and let Pakchan interpret release notes that standard GitHub/GitLab parsing would miss.
+These custom entries are defined in `data/mappings.json` and let Pakchan interpret release notes that standard parsing would miss.
                                                                                                                                                   
 
 ---
@@ -165,26 +160,6 @@ Pakchan stores changelog source mappings in `data/mappings.json`, which is consu
 - Use the [web form](https://dodog.github.io/pakchan/web/) to submit a package and changelog source.
 - Or open a GitHub issue: [Create an issue](https://github.com/dodog/pakchan/issues/new?labels=submission&template=add-package.yml).
 
-### Supported source types
-
-| Type | Description | Example |
-|------|-------------|---------|
-| `github_releases` | GitHub Releases API | `videolan/vlc` |
-| `gitlab_releases` | GitLab Releases API | `gitlab.gnome.org/GNOME/gimp` |
-| `html_page` | Any HTML release notes page | `https://krita.org/en/release-notes/` |
-| `mozilla_releases` | Mozilla-style release notes | Firefox, Thunderbird |
-| `text_file` | Plain text changelog file | `https://example.com/CHANGELOG.txt` |
-
-
-## Repository structure
-
-```
-pakchan.py            # GTK4 application entry point
-data/mappings.json    # Changelog source database
-web/index.html        # Submission form for new mappings
-scripts/              # Helper scripts
-.github/              # GitHub actions and workflows
-```
 
 
 ## License
