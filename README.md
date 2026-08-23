@@ -1,11 +1,19 @@
 
 [![GitHub Pages](https://img.shields.io/badge/Web%20Form-Live-brightgreen)](https://dodog.github.io/pakchan/web/)
-[![Packages](https://img.shields.io/badge/Packages-152-blue)](https://dodog.github.io/pakchan/data/mappings.json)
+[![Packages](https://img.shields.io/badge/Packages-171-blue)](https://dodog.github.io/pakchan/data/mappings.json)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-# 📦 Pakchan
 
-Pakchan is a GTK4 package manager for Manjaro and Arch Linux based system that fetches **real changelogs** for package updates (Pacman, AUR, Flatpak, Snap). It also includes a community-driven changelog source database.
+<picture>
+  <!-- Use this image for dark mode -->
+  <source media="(prefers-color-scheme: dark)" srcset="/web/img/pakchan-logo-wide_dark.png">
+  <!-- Fallback image for light mode and other clients -->
+  <img src="/web/img/pakchan-logo-wide.png" alt="PAKCHAN">
+</picture>
+
+#
+
+**Pakchan** is a GTK4 package manager for Manjaro and Arch Linux based system that fetches **real changelogs** for package updates (Pacman, AUR, Flatpak, Snap). It also includes a community-driven changelog source database.
 
 
 ## ❓ Why I created Pakchan
