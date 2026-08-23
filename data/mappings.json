@@ -351,6 +351,10 @@
       "host": "invent.kde.org",
       "repo": "office/skrooge"
     },
+    "sonnet": {
+      "host": "invent.kde.org",
+      "repo": "frameworks/sonnet"
+    },    
     "smb4k": {
       "host": "invent.kde.org",
       "repo": "network/smb4k"
