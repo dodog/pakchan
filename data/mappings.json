@@ -93,6 +93,7 @@
     "webcamoid": "webcamoid/webcamoid",
     "arrow": "apache/arrow",
     "gmic": "GreycLab/gmic",
+    "expat": "libexpat/libexpat",
     "imagemagick": "imagemagick/imagemagick",
     "zulucrypt": "mhogomchungu/zuluCrypt",
     "zulumount": "mhogomchungu/zuluCrypt"
