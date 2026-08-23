@@ -199,6 +199,14 @@
       "host": "invent.kde.org",
       "repo": "frameworks/kcontacts"
     },
+    "qca-qt5": {
+      "host": "invent.kde.org",
+      "repo": "libraries/qca"
+    },    
+    "qca-qt6": {
+      "host": "invent.kde.org",
+      "repo": "libraries/qca"
+    },  
     "kde-cli-tools": {
       "host": "invent.kde.org",
       "repo": "plasma/kde-cli-tools"
