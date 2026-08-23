@@ -28,6 +28,7 @@
     "aegisub": "TypesettingTools/Aegisub",
     "alacritty": "alacritty/alacritty",
     "aria2": "aria2/aria2",
+    "arrow": "apache/arrow",
     "audacity": "audacity/audacity",
     "bazaar": "bazaar-org/bazaar",
     "bitwarden": "bitwarden/clients",
@@ -45,12 +46,14 @@
     "element-desktop": "element-hq/element-web",
     "element-web": "element-hq/element-web",
     "eslint": "eslint/eslint",
+    "expat": "libexpat/libexpat",
     "fastfetch": "fastfetch-cli/fastfetch",
     "ffmpeg": "FFmpeg/FFmpeg",
     "flameshot": "flameshot-org/flameshot",
     "gdal": "OSGeo/gdal",
     "gdm-settings": "gdm-settings/gdm-settings",
     "git": "git/git",
+    "gmic": "GreycLab/gmic",
     "gnucash": "Gnucash/gnucash",
     "go": "golang/go",
     "gramps": "gramps-project/gramps",
@@ -58,6 +61,7 @@
     "handbrake": "HandBrake/HandBrake",
     "helix": "helix-editor/helix",
     "htop": "htop-dev/htop",
+    "imagemagick": "imagemagick/imagemagick",
     "keepassxc": "keepassxreboot/keepassxc",
     "kitty": "kovidgoyal/kitty",
     "less": "gwsw/less",
@@ -91,10 +95,6 @@
     "vim": "vim/vim",
     "vscodium": "VSCodium/vscodium",
     "webcamoid": "webcamoid/webcamoid",
-    "arrow": "apache/arrow",
-    "gmic": "GreycLab/gmic",
-    "expat": "libexpat/libexpat",
-    "imagemagick": "imagemagick/imagemagick",
     "zulucrypt": "mhogomchungu/zuluCrypt",
     "zulumount": "mhogomchungu/zuluCrypt"
   },
@@ -102,6 +102,10 @@
     "amarok": {
       "host": "invent.kde.org",
       "repo": "multimedia/amarok"
+    },
+    "archlinux-appstream-data": {
+      "host": "gitlab.archlinux.org",
+      "repo": "archlinux/packaging/packages/archlinux-appstream-data"
     },
     "calligra": {
       "host": "invent.kde.org",
@@ -171,10 +175,6 @@
       "host": "invent.kde.org",
       "repo": "graphics/gwenview"
     },
-     "kio": {
-      "host": "invent.kde.org",
-      "repo": "frameworks/kio"
-    },   
     "inkscape": {
       "host": "gitlab.com",
       "repo": "inkscape/inkscape"
@@ -215,9 +215,17 @@
       "host": "invent.kde.org",
       "repo": "frameworks/kdesu"
     },
+    "kglobalacceld": {
+      "host": "invent.kde.org",
+      "repo": "plasma/kglobalacceld"
+    },
     "kid3": {
       "host": "invent.kde.org",
-      "repo": "multimedia/kid3"
+      "repo": "multimedia/kid3/"
+    },
+    "kio": {
+      "host": "invent.kde.org",
+      "repo": "frameworks/kio"
     },
     "kmymoney": {
       "host": "invent.kde.org",
@@ -238,6 +246,18 @@
     "krusader": {
       "host": "invent.kde.org",
       "repo": "utilities/krusader"
+    },
+    "kscreenlocker": {
+      "host": "invent.kde.org",
+      "repo": "plasma/kscreenlocker"
+    },
+    "ksystemstats": {
+      "host": "invent.kde.org",
+      "repo": "plasma/ksystemstats"
+    },
+    "kwayland": {
+      "host": "invent.kde.org",
+      "repo": "plasma/kwayland"
     },
     "kwin": {
       "host": "invent.kde.org",
@@ -267,6 +287,14 @@
       "host": "gitlab.manjaro.org",
       "repo": "applications/mhwd"
     },
+    "mousepad": {
+      "host": "gitlab.xfce.org",
+      "repo": "apps/mousepad"
+    },
+    "nautilus": {
+      "host": "gitlab.gnome.org",
+      "repo": "GNOME/nautilus"
+    },
     "okular": {
       "host": "invent.kde.org",
       "repo": "graphics/okular"
@@ -283,9 +311,17 @@
       "host": "gitlab.manjaro.org",
       "repo": "applications/pacman-mirrors"
     },
+    "pango": {
+      "host": "gitlab.gnome.org",
+      "repo": "GNOME/pango"
+    },
     "plasma-desktop": {
       "host": "invent.kde.org",
       "repo": "plasma/plasma-desktop"
+    },
+    "plasma-workspace": {
+      "host": "invent.kde.org",
+      "repo": "plasma/plasma-workspace"
     },
     "plymouth": {
       "host": "gitlab.freedesktop.org",
@@ -315,38 +351,6 @@
       "host": "invent.kde.org",
       "repo": "graphics/spectacle"
     },
-    "ksystemstats": {
-      "host": "invent.kde.org",
-      "repo": "plasma/ksystemstats"
-    },
-    "kscreenlocker": {
-      "host": "invent.kde.org",
-      "repo": "plasma/kscreenlocker"
-    },
-    "plasma-workspace": {
-      "host": "invent.kde.org",
-      "repo": "plasma/plasma-workspace"
-    },
-    "kid3": {
-      "host": "invent.kde.org",
-      "repo": "multimedia/kid3/"
-    },
-    "kwayland": {
-      "host": "invent.kde.org",
-      "repo": "plasma/kwayland"
-    },
-    "kglobalacceld": {
-      "host": "invent.kde.org",
-      "repo": "plasma/kglobalacceld"
-    },
-    "archlinux-appstream-data": {
-      "host": "gitlab.archlinux.org",
-      "repo": "archlinux/packaging/packages/archlinux-appstream-data"
-    },
-    "pango": {
-      "host": "gitlab.gnome.org",
-      "repo": "GNOME/pango"
-    },
     "spice": {
       "host": "gitlab.freedesktop.org",
       "repo": "spice/spice"
@@ -359,14 +363,6 @@
       "host": "gitlab.freedesktop.org",
       "repo": "spice/spice-protocol"
     },
-    "nautilus": {
-      "host": "gitlab.gnome.org",
-      "repo": "GNOME/nautilus"
-    },   
-    "mousepad": {
-      "host": "gitlab.xfce.org",
-      "repo": "apps/mousepad"
-    },       
     "wine": {
       "host": "gitlab.winehq.org",
       "repo": "wine/wine"
@@ -395,6 +391,7 @@
     "grsync": "https://www.opbyte.it/grsync/changes.html",
     "keepass": "https://keepass.info/news/news_all.html",
     "krita": "https://krita.org/en/release-notes/",
+    "libmediainfo": "https://mediaarea.net/MediaInfo/ChangeLog",
     "libreoffice-fresh": "https://www.libreoffice.org/release-notes/",
     "libreoffice-still": "https://www.libreoffice.org/release-notes/",
     "nano": "https://www.nano-editor.org/news.php",
@@ -407,5 +404,5 @@
     "virtualbox": "https://www.virtualbox.org/wiki/Changelog",
     "vlc": "https://www.videolan.org/vlc/releases/"
   },
-  "total_packages": 152
+  "total_packages": 170
 }
