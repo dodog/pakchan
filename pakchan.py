@@ -20,10 +20,43 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib, Gdk, Gio, Pango
 
+# Vte gives us a real embedded terminal (proper pty, so `sudo`/makepkg
+# password & y/n prompts work exactly like in a normal terminal window).
+# It's optional: distros package it under different GI versions depending
+# on GTK4 support, and some systems won't have it at all — in that case
+# we fall back to a plain pty-backed text panel (see _run_update_subprocess).
+Vte = None
+for _vte_ver in ("3.91", "2.91"):
+    try:
+        gi.require_version("Vte", _vte_ver)
+        from gi.repository import Vte as _Vte
+        Vte = _Vte
+        break
+    except Exception:
+        continue
+_HAVE_VTE = Vte is not None
+
 # Disable WebKit process sandbox when user namespaces are unavailable
 # (avoids "CanCreateUserNamespace() clone() failure: EPERM" on some systems)
 import gzip, html, json, os, re, shlex, shutil, sys, tarfile, tempfile, threading, time
+
+# Used only by the no-Vte update fallback: strips ANSI/terminal control
+# sequences (cursor show/hide, colors, etc.) from raw pty output before
+# it's shown in a plain GtkTextView, which — unlike a real terminal —
+# doesn't interpret them and would otherwise display them as literal
+# text (e.g. a stray "[?25h").
+_ANSI_ESCAPE_RE = re.compile(
+    r'\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])')
+
 os.environ.setdefault("WEBKIT_DISABLE_SANDBOX", "1")
+# Force GTK's software (Cairo) renderer instead of its default GL/Vulkan
+# path. On systems without a working Vulkan driver, GTK4 can fall back to
+# Zink (an OpenGL-over-Vulkan translation layer) and fail noisily —
+# "libEGL warning: ... MESA-LOADER ...", "ZINK: vkCreateInstance failed" —
+# even though the app still renders fine via software fallback. Forcing
+# Cairo up front avoids that driver probing (and its warnings) entirely;
+# for a widget-heavy app like this one there's no real performance cost.
+os.environ.setdefault("GSK_RENDERER", "cairo")
 import subprocess, urllib.request, urllib.error, urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -48,6 +81,8 @@ class Package:
     checked:        bool = False
     is_dep:         bool = False
     has_desktop_entry: bool = False   # True if a .desktop launcher exists
+    icon_name:      str = ""          # icon theme name to look up for this package's row
+    size_bytes:     int = 0           # raw installed size, used for sorting (installed_size is display-only)
     changelog:      Optional[dict] = None
 
     @property
@@ -187,26 +222,6 @@ def _is_bot_protection_page(body: str) -> bool:
             "challenge" in low)
 
 
-# ─── HTTP caching (short-lived session cache to avoid re-fetching) ──────────
-
-_http_cache: dict[str, tuple[str, float]] = {}
-_HTTP_CACHE_TTL = 30  # seconds
-
-def http_get_cached(url: str, timeout: int = 14) -> Optional[str]:
-    """Fetch URL with short-lived session cache (30s TTL).
-    Avoids re-fetching the same URL multiple times in quick succession.
-    """
-    now = time.time()
-    if url in _http_cache:
-        body, ts = _http_cache[url]
-        if now - ts < _HTTP_CACHE_TTL:
-            return body
-    body = http_get(url, timeout)
-    if body:
-        _http_cache[url] = (body, now)
-    return body
-
-
 # Fix #9 — shutil.which() instead of spawning `which`
 _CMD_CACHE: dict[str, bool] = {}
 
@@ -271,7 +286,7 @@ def _read_local_db() -> dict:
             "desc":    " ".join(fields.get("desc", [""])),
             "url":     " ".join(fields.get("url", [""])),
             "license": " ".join(fields.get("license", [""])),
-            "size":    " ".join(fields.get("isize", [""])),
+            "size":    " ".join(fields.get("size", [""])),
             "depends": ", ".join(fields.get("depends", [])),
             "reason":  reason,
         }
@@ -318,7 +333,76 @@ def _read_sync_db_names() -> tuple[set, bool]:
 
 # ─── Update detection ─────────────────────────────────────────────────────────
 
-def _pending_pacman_updates() -> dict:
+def _pending_pacman_updates_from_sync(local_db: dict) -> dict:
+    """
+    Fallback update detection that doesn't depend on the pacman-contrib
+    `checkupdates` tool. `checkupdates` does its own background sync to a
+    temp copy of the databases, which needs network access and a writable
+    temp dir — if that's missing, blocked, or pacman-contrib simply isn't
+    installed, it fails (or isn't found) and the caller previously just
+    got an empty dict back with no way to tell "no updates" apart from
+    "couldn't check". This reads versions directly out of the databases
+    already synced to /var/lib/pacman/sync/*.db (the same files
+    _read_sync_db_names uses for package names) — no network needed —
+    and compares against the installed version with pacman's own
+    `vercmp` for a canonically correct result (handles epoch/pkgrel
+    exactly the way pacman itself does).
+    """
+    if not PACMAN_SYNC.exists() or not cmd_exists("vercmp"):
+        return {}
+
+    sync_versions: dict[str, str] = {}
+    for db_path in PACMAN_SYNC.glob("*.db"):
+        try:
+            with tarfile.open(db_path, "r:gz") as tf:
+                for member in tf.getmembers():
+                    if not member.name.endswith("/desc"):
+                        continue
+                    f = tf.extractfile(member)
+                    if not f:
+                        continue
+                    text = f.read().decode("utf-8", errors="replace")
+                    name = version = ""
+                    cur = None
+                    for line in text.splitlines():
+                        line = line.strip()
+                        if line == "%NAME%":
+                            cur = "name"; continue
+                        if line == "%VERSION%":
+                            cur = "version"; continue
+                        if line.startswith("%") and line.endswith("%"):
+                            cur = None; continue
+                        if cur == "name" and not name:
+                            name = line
+                        elif cur == "version" and not version:
+                            version = line
+                    if name and version:
+                        sync_versions[name] = version
+        except Exception:
+            continue
+
+    result: dict[str, str] = {}
+    for name, sync_ver in sync_versions.items():
+        local_info = local_db.get(name)
+        if not local_info:
+            continue
+        local_ver = local_info.get("version", "")
+        # Identical strings can never be an update — skip without paying
+        # for a vercmp call; only genuinely differing versions need the
+        # real comparison (epoch/pkgrel-aware, not a plain string compare).
+        if not local_ver or local_ver == sync_ver:
+            continue
+        out, _, rc = run(["vercmp", sync_ver, local_ver], timeout=5)
+        if rc == 0 and out.strip():
+            try:
+                if int(out.strip()) > 0:
+                    result[name] = sync_ver
+            except ValueError:
+                pass
+    return result
+
+
+def _pending_pacman_updates(local_db: Optional[dict] = None) -> dict:
     out, _, rc = run(["checkupdates"], timeout=45)
     result = {}
     if rc == 0 and out:
@@ -326,7 +410,15 @@ def _pending_pacman_updates() -> dict:
             p = line.split()
             if len(p) >= 4:
                 result[p[0]] = p[3]
-    return result
+    if result or local_db is None:
+        return result
+    # checkupdates found nothing — but that's indistinguishable here
+    # from checkupdates being missing entirely, or its background sync
+    # having failed silently. Don't treat that as "definitely no
+    # updates"; cross-check directly against the already-synced local
+    # databases instead, which needs no extra tool and no new network
+    # activity of its own.
+    return _pending_pacman_updates_from_sync(local_db)
 
 
 def _pending_aur_updates(helper: str) -> dict:
@@ -358,18 +450,67 @@ def _pending_flatpak_updates() -> dict:
     return result
 
 
+def _installed_flatpak_versions() -> dict:
+    """
+    Bulk-fetch installed Flatpak versions via a single `flatpak list`
+    call. Previously versions were read from each app's per-app
+    `metadata` file, but that file's format has no version= key at all
+    — it always fell through to a generic "installed" placeholder for
+    every Flatpak app. Only non-empty versions are recorded here: many
+    Flatpak apps don't declare an explicit version and just version by
+    branch (e.g. "stable"), which _flatpak_installed_version falls back
+    to when nothing is found here.
+    """
+    out, _, rc = run(["flatpak", "list", "--columns=application,version"], timeout=20)
+    result = {}
+    if rc == 0 and out:
+        for line in out.splitlines():
+            parts = line.split("\t") if "\t" in line else line.split()
+            if parts and "." in parts[0]:
+                ver = parts[1].strip() if len(parts) > 1 else ""
+                if ver:
+                    result[parts[0].strip()] = ver
+    return result
+
+
 # ─── Package enumeration (parallelised — fix #5) ──────────────────────────────
 
-def _packages_with_desktop_entries() -> set[str]:
+def _parse_desktop_icon(desktop_path: Path) -> Optional[str]:
+    """Read the Icon= value from a .desktop file's [Desktop Entry] section."""
+    try:
+        text = desktop_path.read_text(errors="replace")
+    except Exception:
+        return None
+    in_section = False
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("[") and line.endswith("]"):
+            in_section = (line == "[Desktop Entry]")
+            continue
+        if in_section and line.startswith("Icon="):
+            val = line.split("=", 1)[1].strip()
+            return val or None
+    return None
+
+
+def _desktop_entries_info() -> dict[str, str]:
     """
-    Determine which installed packages own a .desktop launcher file —
-    the same signal PAMAC uses to separate "applications you'd actually
-    launch" from libraries/CLI tools/background services.
+    For each installed package, determine whether it owns a .desktop
+    launcher file — the same signal PAMAC uses to separate "applications
+    you'd actually launch" from libraries/CLI tools/background services —
+    and, if so, read its declared icon name so the package list can show
+    a real app icon (again, like PAMAC) instead of a generic placeholder.
 
     Reads /var/lib/pacman/local/<pkg-ver>/files directly (already on disk,
-    no subprocess) rather than calling `pacman -Ql` for every package.
+    no subprocess) to find the .desktop file's path, then reads that file
+    itself for its Icon= key.
+
+    Returns {pkg_name: icon_name}. icon_name is "" when a desktop file
+    exists but has no (or an unparseable) Icon= key — the key's mere
+    presence in the dict is what signals "this package has a launcher",
+    distinct from a package that owns no .desktop file at all.
     """
-    result: set[str] = set()
+    result: dict[str, str] = {}
     if not PACMAN_LOCAL.exists():
         return result
     for pkg_dir in PACMAN_LOCAL.iterdir():
@@ -380,12 +521,23 @@ def _packages_with_desktop_entries() -> set[str]:
             text = files_path.read_text(errors="replace")
         except Exception:
             continue
-        if "share/applications/" in text and ".desktop" in text:
-            # Package name is the dir name minus the trailing "-version-rel"
-            pkg_ver = pkg_dir.name
-            segments = pkg_ver.rsplit("-", 2)
-            name = segments[0] if len(segments) >= 2 else pkg_ver
-            result.add(name)
+        desktop_rel_paths = [
+            line.strip() for line in text.splitlines()
+            if "share/applications/" in line and line.strip().endswith(".desktop")
+        ]
+        if not desktop_rel_paths:
+            continue
+        # Package name is the dir name minus the trailing "-version-rel"
+        pkg_ver = pkg_dir.name
+        segments = pkg_ver.rsplit("-", 2)
+        name = segments[0] if len(segments) >= 2 else pkg_ver
+        icon_name = ""
+        for rel in desktop_rel_paths:
+            parsed = _parse_desktop_icon(Path("/" + rel.lstrip("/")))
+            if parsed:
+                icon_name = parsed
+                break
+        result[name] = icon_name
     return result
 
 
@@ -393,12 +545,12 @@ def _load_pacman_aur(local_db: dict, sync_names: set,
                      aur_helper: Optional[str]) -> tuple[list, dict, dict]:
     """Returns (packages, pacman_pending, aur_pending)."""
     with ThreadPoolExecutor(max_workers=2) as ex:
-        f_pac = ex.submit(_pending_pacman_updates)
+        f_pac = ex.submit(_pending_pacman_updates, local_db)
         f_aur = ex.submit(_pending_aur_updates, aur_helper) if aur_helper else None
-        f_gui = ex.submit(_packages_with_desktop_entries)
+        f_gui = ex.submit(_desktop_entries_info)
         pacman_pending  = f_pac.result()
         aur_pending     = f_aur.result() if f_aur else {}
-        desktop_owners  = f_gui.result()
+        desktop_icons   = f_gui.result()
 
     pkgs = []
     for name, info in sorted(local_db.items()):
@@ -410,16 +562,23 @@ def _load_pacman_aur(local_db: dict, sync_names: set,
         else:
             repo    = "aur"
             new_ver = aur_pending.get(name, "")
+        raw_size = info.get("size", "")
+        try:
+            size_bytes = int(raw_size) if raw_size else 0
+        except ValueError:
+            size_bytes = 0
         pkgs.append(Package(
             name=name, version=version, new_version=new_ver,
             description=info.get("desc", ""),
             repo=repo,
-            installed_size=_fmt_bytes(info.get("size", "")),
+            installed_size=_fmt_bytes(raw_size),
+            size_bytes=size_bytes,
             license=info.get("license", ""),
             url=info.get("url", ""),
             depends=info.get("depends", ""),
             is_dep=(reason == "1"),
-            has_desktop_entry=(name in desktop_owners),
+            has_desktop_entry=(name in desktop_icons),
+            icon_name=desktop_icons.get(name, ""),
         ))
     return pkgs, pacman_pending, aur_pending
 
@@ -427,7 +586,8 @@ def _load_pacman_aur(local_db: dict, sync_names: set,
 def _load_flatpak() -> list:
     if not cmd_exists("flatpak"):
         return []
-    fp_pending = _pending_flatpak_updates()
+    fp_pending  = _pending_flatpak_updates()
+    fp_versions = _installed_flatpak_versions()
     flatpak_dirs = [d for d in [
         Path("/var/lib/flatpak/app"),
         Path.home() / ".local/share/flatpak/app",
@@ -444,12 +604,13 @@ def _load_flatpak() -> list:
             if app_id in seen or "." not in app_id:
                 continue
             seen.add(app_id)
-            ver = _flatpak_installed_version(app_dir)
+            ver = _flatpak_installed_version(app_dir, fp_versions.get(app_id, ""))
             pkgs.append(Package(
                 name=app_id, version=ver,
                 new_version=fp_pending.get(app_id, ""),
                 description="", repo="flatpak",
                 has_desktop_entry=True,   # Flatpak apps always ship a .desktop file
+                icon_name=app_id,         # Flatpak exports its icon under the app ID
             ))
     return pkgs
 
@@ -470,19 +631,25 @@ def _load_snap() -> list:
             pkgs.append(Package(
                 name=parts[0], version=parts[1],
                 new_version="", description="", repo="snap",
+                icon_name=parts[0],   # best-effort guess; falls back gracefully if unresolved
             ))
     return pkgs
 
 
-def _flatpak_installed_version(app_dir: Path) -> str:
+def _flatpak_installed_version(app_dir: Path, cli_version: str = "") -> str:
+    """
+    Prefer the version from `flatpak list` (see _installed_flatpak_versions
+    — bulk-fetched once, not per-app). Many Flatpak apps don't declare an
+    explicit version at all and just version by branch (e.g. "stable",
+    "23.08"), in which case fall back to the installed branch name so
+    there's still something meaningful shown instead of a generic
+    "installed" placeholder.
+    """
+    if cli_version:
+        return cli_version
     try:
         for branch_dir in app_dir.iterdir():
-            for arch_dir in branch_dir.iterdir():
-                meta = arch_dir / "active" / "metadata"
-                if meta.exists():
-                    for line in meta.read_text(errors="replace").splitlines():
-                        if line.startswith("version="):
-                            return line.split("=", 1)[1].strip()
+            return branch_dir.name
     except Exception:
         pass
     return "installed"
@@ -719,7 +886,10 @@ KNOWN_RELEASE_PAGES: dict[str, str]             = {}
 DEFAULT_CUSTOM: dict[str, dict] = {
     "firefox": {"parser": "mozilla", "url": "https://www.mozilla.org/en-US/firefox/releases/"},
     "thunderbird": {"parser": "mozilla", "url": "https://www.thunderbird.net/en-US/thunderbird/releases/"},
-    "krita": {"parser": "krita", "url": "https://krita.org/en/"},
+    # Note: Krita previously had a dedicated custom parser here, but its
+    # output was unreliable in practice and has been removed — it now
+    # falls through to the generic release-page scraper (or a plain link)
+    # via the "krita" entry in mappings.json's "release_pages" section.
     "scribus": {
         "parser": "mantisbt",
         "url": "https://bugs.scribus.net/changelog_page.php",
@@ -739,17 +909,6 @@ KNOWN_GITLAB_LIKE = {
     "gitlab.winehq.org",
     "gitlab.archlinux.org",
 }
-
-def _is_gitlab_host(host: str) -> bool:
-    """Return True if host is a GitLab instance we should treat as GitLab."""
-    if not host:
-        return False
-    h = host.lower()
-    if "gitlab" in h:
-        return True
-    if any(h.endswith(k) for k in KNOWN_GITLAB_LIKE):
-        return True
-    return False
 
 def _apply_mappings(data: dict):
     global KNOWN_GITHUB_REPOS, KNOWN_GITLAB_REPOS, KNOWN_RELEASE_PAGES, KNOWN_CUSTOM
@@ -915,44 +1074,6 @@ def _strip_noise_blocks(html: str) -> str:
     return html
 
 
-def _extract_main(html: str) -> Optional[str]:
-    """Try to find the main content block of a page."""
-    for pattern in [
-        r'<main[^>]*>(.*?)</main>',
-        r'<article[^>]*>(.*?)</article>',
-        r'<div[^>]*class="[^"]*(?:content|main|release|notes|body)[^"]*"[^>]*>(.*?)</div>',
-        r'<div[^>]*id="[^"]*(?:content|main|release|notes)[^"]*"[^>]*>(.*?)</div>',
-    ]:
-        m = re.search(pattern, html, re.DOTALL | re.IGNORECASE)
-        if m:
-            return m.group(1)
-    return None
-
-
-def _filter_changes(html_items: list[str], min_len: int = 8,
-                    max_len: int = 500) -> list[str]:
-    """
-    Strip HTML from a list of raw <li> inner contents,
-    filter out CSS/JS noise and navigation fragments.
-    """
-    results = []
-    for item in html_items:
-        text = _strip_html(item).strip()
-        if not (min_len < len(text) < max_len):
-            continue
-        # Skip CSS/JS noise
-        if ('{' in text or '}' in text
-                or text.startswith('.')
-                or text.startswith('@')
-                or re.search(r'fill:|behavior:|url\(|^\s*\*\s*\{', text)):
-            continue
-        # Skip pure navigation fragments (single words / very short)
-        if len(text.split()) < 2:
-            continue
-        results.append(text)
-    return results
-
-
 # ── Release page dispatcher ───────────────────────────────────────────────────
 
 def _fetch_parallel(urls: list[str], timeout: int = 12) -> dict[str, Optional[str]]:
@@ -969,14 +1090,14 @@ def _fetch_parallel(urls: list[str], timeout: int = 12) -> dict[str, Optional[st
 
 # ── Custom parsers (from mappings.json "custom" section) ─────────────────────
 
-def _scrape_custom(pkg_name: str, entry: dict) -> Optional[dict]:
+def _scrape_custom(pkg_name: str, entry: dict, target_version: str = "") -> Optional[dict]:
     """Dispatch to custom parser based on entry['parser'] field."""
     parser = entry.get("parser", "")
     if parser == "gitlab":
         host = entry.get("host", "")
         repo = entry.get("repo", "")
         if host and repo:
-            return _gitlab_releases(host, repo, pkg_name)
+            return _gitlab_releases(host, repo, pkg_name, target_version)
         return None
 
     url    = entry.get("url", "")
@@ -992,7 +1113,7 @@ def _scrape_custom(pkg_name: str, entry: dict) -> Optional[dict]:
         host = entry.get("host", "")
         repo = entry.get("repo", "")
         if host and repo:
-            gitlab_result = _gitlab_releases(host, repo, pkg_name)
+            gitlab_result = _gitlab_releases(host, repo, pkg_name, target_version)
             if gitlab_result and gitlab_result.get("versions"):
                 return gitlab_result
         # Detect if the page is a bot-protection challenge (Anubis, Cloudflare, etc)
@@ -1002,7 +1123,7 @@ def _scrape_custom(pkg_name: str, entry: dict) -> Optional[dict]:
             host = entry.get("host", "")
             repo = entry.get("repo", "")
             if host and repo:
-                gitlab_result = _gitlab_releases(host, repo, pkg_name)
+                gitlab_result = _gitlab_releases(host, repo, pkg_name, target_version)
                 if gitlab_result and gitlab_result.get("versions"):
                     return gitlab_result
         if url:
@@ -1015,13 +1136,20 @@ def _scrape_custom(pkg_name: str, entry: dict) -> Optional[dict]:
             }
         return None
     if parser == "text_file":
+        # Some "text_file" mappings actually point at markdown-formatted
+        # NEWS/RELEASE-NOTES files — e.g. Electrum's RELEASE-NOTES uses
+        # "# Release X.Y.Z (date)" headings, the same single-# pattern
+        # PipeWire's NEWS file uses. Detect that regardless of what the
+        # mapping declares and use the markdown-aware parser when it
+        # applies, since it handles headings (and version extraction)
+        # far more reliably than the plain-text heuristic parser.
+        if _looks_like_markdown_changelog(body):
+            return _scrape_github_raw_changelog(body)
         return _scrape_text_file(body)
     if parser == "github_raw":
         return _scrape_github_raw_changelog(body)
     if parser == "mozilla":
         return _scrape_mozilla(url, body)
-    if parser == "krita":
-        return _scrape_krita(body, url)
     if parser == "filezilla":
         return _scrape_filezilla_changelog(body, url)
     # Unknown parser type — nothing we know how to parse; caller falls
@@ -1174,17 +1302,64 @@ def _scrape_text_file(body: str) -> Optional[dict]:
     return {"versions": versions, "source": "Plain-text release notes"} if versions else None
 
 
+def _looks_like_markdown_changelog(body: str) -> bool:
+    """
+    True if the file uses Markdown-style headings (single "#", "##", or
+    "###") to separate release entries, rather than a purely plain-text
+    NEWS format. Previously this only checked for "##" specifically,
+    which missed files (like PipeWire's NEWS) that use a single "#" per
+    release — those got routed to the much less capable plain-text
+    parser instead of the markdown-aware one.
+    """
+    return bool(re.search(r'(?m)^#{1,3}[ \t]', body[:2000]))
+
+
 def _scrape_github_raw_changelog(body: str) -> Optional[dict]:
-    """Parse a raw CHANGELOG/RELEASE-NOTES file from GitHub (Markdown or plain text)."""
+    """Parse a raw CHANGELOG/RELEASE-NOTES/NEWS file (Markdown headings)
+    into per-version entries.
+
+    Handles headings like:
+        ## [1.2.3] - 2024-01-01
+        ## 1.2.3
+        # v1.2.3
+        # PipeWire 1.6.0 (2026-02-19)      <- project-name prefix
+
+    The project-name-prefix form was previously unsupported (the old
+    regex required a version number immediately after the "#" marker),
+    which meant files using it — like PipeWire's NEWS — fell straight
+    through to the much less reliable plain-text parser and could miss
+    the true latest entry entirely, letting some unrelated fragment
+    further down get misparsed as the "newest" version instead.
+    """
     versions = []
-    # Match: ## [X.Y.Z] - YYYY-MM-DD   or   ## X.Y.Z   or   # vX.Y.Z
-    for ver, date, block in re.findall(
-            r'^#{1,3}\s+\[?v?([\d]+\.[\d.]+[^\]\s]*)\]?'
-            r'(?:\s*[-–]\s*(\d{4}-\d{2}-\d{2}))?\s*\n(.*?)(?=^#{1,3}\s|\Z)',
-            body, re.DOTALL | re.MULTILINE)[:6]:
+    heading_re = re.compile(
+        r'^(#{1,3}[ \t]+[^\n]*)\n'      # group 1: the whole heading line (single line only)
+        r'(.*?)'                        # group 2: body until next heading/EOF
+        r'(?=^#{1,3}[ \t]+|\Z)',
+        re.DOTALL | re.MULTILINE)
+    # Version number must appear within the first few words of the
+    # heading (at most 3 leading project-name-like words) — this avoids
+    # false positives on unrelated headings that merely mention a number
+    # somewhere in a sentence, e.g. "## Requirements: GTK 4.0 or later".
+    version_in_heading_re = re.compile(
+        r'^#{1,3}[ \t]+(?:[A-Za-z][\w.+-]{0,20}[ \t]+){0,3}'
+        r'\[?v?(\d+\.\d[\d.]*(?:-[\w.]+)?)\]?')
+    date_in_heading_re = _GENERIC_DATE_RE
+
+    for m in heading_re.finditer(body):
+        heading_line = m.group(1)
+        block        = m.group(2)
+        vm = version_in_heading_re.match(heading_line)
+        if not vm:
+            continue
+        ver  = vm.group(1)
+        dm   = date_in_heading_re.search(heading_line)
+        date = _normalize_date_str(dm.group(0)) if dm else ""
         changes = _parse_md_changelog(block)
         versions.append({"version": ver, "date": date,
                          "changes": changes[:10] or [f"Release {ver}"]})
+        if len(versions) >= 6:
+            break
     if versions:
         return {"versions": versions, "source": "GitHub raw changelog"}
     # Fall back to plain-text parser for non-Markdown changelog formats
@@ -1406,84 +1581,228 @@ def _scrape_filezilla_changelog(body: str, url: str) -> Optional[dict]:
     return None
 
 
-def _scrape_krita(body: str, url: str) -> Optional[dict]:
-    """Parse Krita release posts from the Krita website."""
+# ─── Generic release-notes scraper (for arbitrary "release_pages" sites) ────
+#
+# Sites in mappings.json's "release_pages" section (Blender, GIMP, KeePass,
+# nano, Samba, VLC, VirtualBox, etc.) have no shared structure, so a
+# dedicated per-site parser for each one doesn't scale. Instead, this looks
+# for the *pattern* nearly all of them share: a repeating heading (h1-h4) or
+# table row containing a version number, followed by descriptive text or
+# list items until the next one.
+#
+# Because this is inherently heuristic, it only returns a result when it
+# finds at least MIN_ENTRIES plausible, distinct version sections with real
+# content. Otherwise it returns None, and the caller falls back to the
+# simple "see <url> for details" link — which is always correct, even when
+# this scraper isn't confident enough to trust its own output.
+
+_GENERIC_HEADING_RE = re.compile(
+    r'<(h[1-4])[^>]*>(.*?)</\1>', re.IGNORECASE | re.DOTALL)
+_GENERIC_VERSION_IN_TEXT_RE = re.compile(
+    r'\b(?:version\s+|release\s+|v\.?)?(\d{1,4}(?:\.\d{1,4}){1,3})\b', re.IGNORECASE)
+_GENERIC_DATE_RE = re.compile(
+    r'(\d{4}[-/]\d{1,2}[-/]\d{1,2}'
+    r'|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4})',
+    re.IGNORECASE)
+_GENERIC_MIN_ENTRIES = 2   # need at least this many plausible sections to trust the result
+
+
+def _normalize_date_str(raw: str) -> str:
+    """Best-effort conversion of a found date string to YYYY-MM-DD."""
+    raw = raw.strip()
+    m = re.match(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', raw)
+    if m:
+        y, mo, d = m.groups()
+        return f"{y}-{int(mo):02d}-{int(d):02d}"
+    for fmt in ("%B %d, %Y", "%b %d, %Y", "%B %d %Y", "%b %d %Y"):
+        try:
+            return datetime.strptime(raw.replace(",", ""), fmt.replace(",", "")).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return raw[:10]
+
+
+def _extract_generic_block_changes(block_html: str) -> list[str]:
+    """Pull descriptive lines out of the HTML between one version heading
+    (or table row) and the next — list items if present, else paragraphs."""
+    items = re.findall(r'<li[^>]*>(.*?)</li>', block_html, re.DOTALL)
+    if items:
+        changes = [_strip_html(i).strip() for i in items]
+    else:
+        paras = re.findall(r'<p[^>]*>(.*?)</p>', block_html, re.DOTALL)
+        changes = [_strip_html(p).strip() for p in paras]
+    # Drop empty/junk fragments: CSS/JS leftovers, nav labels, etc.
+    changes = [c for c in changes
+               if 5 < len(c) < 400 and "{" not in c and "function(" not in c
+               and len(c.split()) >= 2]
+    return changes[:10]
+
+
+def _scrape_headings_for_versions(html_text: str) -> list[dict]:
+    """Strategy 1: repeating h1-h4 headings, each naming a version."""
+    matches = list(_GENERIC_HEADING_RE.finditer(html_text))
+    versions = []
+    for i, m in enumerate(matches):
+        heading_text = _strip_html(m.group(2))
+        vm = _GENERIC_VERSION_IN_TEXT_RE.search(heading_text)
+        if not vm:
+            continue
+        ver = vm.group(1)
+        dm  = _GENERIC_DATE_RE.search(heading_text)
+        date = _normalize_date_str(dm.group(0)) if dm else ""
+        start = m.end()
+        end   = matches[i + 1].start() if i + 1 < len(matches) else len(html_text)
+        changes = _extract_generic_block_changes(html_text[start:end])
+        versions.append({"version": ver, "date": date,
+                         "changes": changes or [f"Release {ver}"]})
+    return versions
+
+
+def _scrape_bold_or_dt_for_versions(html_text: str) -> list[dict]:
+    """
+    Strategy: some changelog pages mark each release with bold text or a
+    <dt> term rather than a real <hN> heading — e.g. MediaWiki-rendered
+    wikis like VirtualBox's Changelog page, which uses
+    "<b>VirtualBox 7.2.14</b> (released ...)" followed by a <ul> of fixes,
+    not an actual heading tag. Tried only as a fallback when heading-based
+    detection finds nothing meaningful, since <b>/<strong> are common for
+    plain emphasis too and are a noisier signal than real headings — the
+    block window is capped so a false match can't swallow huge amounts of
+    unrelated page content.
+    """
+    matches = list(re.finditer(
+        r'<(b|strong|dt)[^>]*>(.*?)</\1>', html_text, re.IGNORECASE | re.DOTALL))
+    versions = []
+    for i, m in enumerate(matches):
+        text = _strip_html(m.group(2))
+        vm = _GENERIC_VERSION_IN_TEXT_RE.search(text)
+        if not vm:
+            continue
+        ver = vm.group(1)
+        dm = _GENERIC_DATE_RE.search(text)
+        date = _normalize_date_str(dm.group(0)) if dm else ""
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else min(start + 4000, len(html_text))
+        changes = _extract_generic_block_changes(html_text[start:end])
+        versions.append({"version": ver, "date": date,
+                         "changes": changes or [f"Release {ver}"]})
+    return versions
+
+
+def _scrape_table_rows_for_versions(html_text: str) -> list[dict]:
+    """Strategy 2: a simple table of releases (version/date/notes columns)
+    — common on "list of all versions" pages that aren't really a
+    changelog, just an index (e.g. Samba's history page)."""
+    rows = re.findall(r'<tr[^>]*>(.*?)</tr>', html_text, re.DOTALL | re.IGNORECASE)
+    versions = []
+    for row in rows:
+        text = _strip_html(row)
+        vm = _GENERIC_VERSION_IN_TEXT_RE.search(text)
+        if not vm:
+            continue
+        ver = vm.group(1)
+        dm  = _GENERIC_DATE_RE.search(text)
+        date = _normalize_date_str(dm.group(0)) if dm else ""
+        remainder = text.replace(vm.group(0), "", 1)
+        if dm:
+            remainder = remainder.replace(dm.group(0), "", 1)
+        remainder = re.sub(r'\s+', ' ', remainder).strip(" -–|\t")
+        versions.append({"version": ver, "date": date,
+                         "changes": [remainder] if len(remainder) > 3 else [f"Release {ver}"]})
+    return versions
+
+
+def _scrape_index_links_for_versions(html_text: str) -> list[tuple]:
+    """
+    Strategy 3 input: index/list pages where each version is just a link
+    with no inline content of its own — e.g. GIMP's release-notes page,
+    which lists "3.2", "3.0", "2.10", ... as links to per-version
+    subpages rather than showing any changelog text directly. Returns
+    (version, href) pairs, in document order, so the caller can follow
+    the newest one.
+    """
+    hrefs = re.findall(r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', html_text,
+                       re.DOTALL | re.IGNORECASE)
+    candidates = []
+    for href, text in hrefs:
+        label = _strip_html(text)
+        vm = _GENERIC_VERSION_IN_TEXT_RE.search(label) or _GENERIC_VERSION_IN_TEXT_RE.search(href)
+        if vm:
+            candidates.append((vm.group(1), href))
+    return candidates
+
+
+def _has_meaningful_entry(versions: list[dict]) -> bool:
+    return any(_is_meaningful_changelog(v.get("changes", [])) for v in versions)
+
+
+def _generic_release_page_scraper(url: str, pkg_name: str) -> Optional[dict]:
+    """
+    Best-effort, site-agnostic scraper for arbitrary "release notes" pages.
+    Tries, in order: heading-based sections, bold/dt-based sections
+    (MediaWiki-style pages), a table-row layout, and finally — if the page
+    turns out to be a bare index of version links with no inline content —
+    following the newest-looking link one hop deep and scraping that.
+    Returns None (triggering the plain-link fallback) unless it ends up
+    with at least one genuinely descriptive version entry; a low-
+    confidence or wrong result is worse than an honest link, so the bar
+    is "found real content", not "found several entries" — a page whose
+    only release notes are for the single latest version (e.g. VS Code's
+    updates page, which redirects straight to the current release) is a
+    perfectly valid, if minimal, result.
+    """
+    body = http_get(url, timeout=14)
     if not body:
         return None
+    clean = _strip_noise_blocks(body)
 
-    def _extract_post_area(html: str) -> str:
-        m = re.search(r'<div[^>]+class=["\']?post["\']?[^>]*>', html, re.IGNORECASE)
-        if not m:
-            return html
-        start = m.start()
-        segment = html[start:]
-        depth = 0
-        pos = 0
-        while pos < len(segment):
-            if segment[pos:pos+4].lower() == '<div':
-                depth += 1
-                pos += 4
-                continue
-            if segment[pos:pos+6].lower() == '</div>':
-                depth -= 1
-                pos += 6
-                if depth == 0:
-                    return segment[:pos]
-                continue
-            pos += 1
-        return segment
+    versions = _scrape_headings_for_versions(clean)
+    if not _has_meaningful_entry(versions):
+        alt = _scrape_bold_or_dt_for_versions(clean)
+        if _has_meaningful_entry(alt):
+            versions = alt
+    if not _has_meaningful_entry(versions):
+        alt = _scrape_table_rows_for_versions(clean)
+        if _has_meaningful_entry(alt):
+            versions = alt
 
-    candidates = []
-    for href in re.findall(r'href=["\']?([^"\'\s>]+)["\']?', body, re.IGNORECASE):
-        if re.search(r'/en/posts/\d{4}/krita-[^/]+-released/?$', href, re.IGNORECASE):
-            candidates.append(urllib.parse.urljoin(url, href))
-    candidates = list(dict.fromkeys(candidates))[:8]
+    if _has_meaningful_entry(versions):
+        versions.sort(key=lambda v: _tag_selection_key(v.get("version", "")), reverse=True)
+        return {"versions": versions[:8], "source": f"Release notes (auto-detected) — {url}"}
 
-    versions = []
-    for post_url in candidates:
-        post_body = http_get(post_url, timeout=12)
-        if not post_body:
+    # Maybe this is just an index of links to per-version pages
+    # (e.g. GIMP's release-notes page) rather than a changelog itself.
+    index_links = _scrape_index_links_for_versions(clean)
+    if len(index_links) < _GENERIC_MIN_ENTRIES:
+        return None
+
+    # Try two candidates for "the newest": first in document order (most
+    # index/news pages list newest-first — a more robust signal than
+    # parsed-version sorting, which noisy extraction can throw off) and
+    # the highest by parsed version, if that's a different link.
+    by_doc_order = index_links[0]
+    by_version   = max(index_links, key=lambda t: _tag_selection_key(t[0]))
+    for newest_ver, newest_href in dict.fromkeys([by_doc_order, by_version]):
+        sub_url = urllib.parse.urljoin(url, newest_href)
+        if sub_url == url:
             continue
-
-        title = ""
-        m = re.search(r'<h1[^>]*>(.*?)</h1>', post_body, re.IGNORECASE | re.DOTALL)
-        if m:
-            title = _strip_html(m.group(1)).strip()
-
-        ver = ""
-        if title:
-            vm = re.search(r'Krita\s*([0-9]+(?:\.[0-9]+)+)', title, re.IGNORECASE)
-            ver = vm.group(1) if vm else title
-
-        date = ""
-        dm = re.search(
-            r'<meta[^>]+property=["\']article:published_time["\'][^>]+content=["\']([^"\']+)["\']',
-            post_body, re.IGNORECASE)
-        if not dm:
-            dm = re.search(r'<span[^>]*>([^<]*\d{4})</span>', post_body, re.IGNORECASE)
-        if dm:
-            date = dm.group(1)[:10]
-
-        post_area = _extract_post_area(post_body)
-        changes = []
-
-        for li in re.findall(r'<li[^>]*>(.*?)</li>', post_area, re.IGNORECASE | re.DOTALL):
-            text = _strip_html(li).strip()
-            if text and len(text) > 10:
-                changes.append(text)
-        if not changes:
-            for p in re.findall(r'<p[^>]*>(.*?)</p>', post_area, re.IGNORECASE | re.DOTALL):
-                text = _strip_html(p).strip()
-                if text and len(text) > 20:
-                    changes.extend([line.strip() for line in text.splitlines() if line.strip()])
-                    break
-
-        if ver and changes:
-            versions.append({"version": ver, "date": date, "changes": changes[:10]})
-        elif title and changes:
-            versions.append({"version": title, "date": date, "changes": changes[:10]})
-
-    return {"versions": versions, "source": f"Krita release posts — {url}"} if versions else None
+        sub_body = http_get(sub_url, timeout=14)
+        if not sub_body:
+            continue
+        sub_clean = _strip_noise_blocks(sub_body)
+        sub_versions = _scrape_headings_for_versions(sub_clean)
+        if not _has_meaningful_entry(sub_versions):
+            # The whole subpage IS the notes for this one version — use
+            # its list items/paragraphs directly rather than requiring a
+            # version-labelled heading.
+            changes = _extract_generic_block_changes(sub_clean)
+            if changes:
+                sub_versions = [{"version": newest_ver, "date": "", "changes": changes}]
+        if _has_meaningful_entry(sub_versions):
+            sub_versions.sort(key=lambda v: _tag_selection_key(v.get("version", "")), reverse=True)
+            return {"versions": sub_versions[:8],
+                    "source": f"Release notes (auto-detected, followed index link) — {sub_url}"}
+    return None
 
 
 # ─── Changelog: upstream GitHub / GitLab ─────────────────────────────────────
@@ -1580,7 +1899,7 @@ def _find_repo_link_in_page(url: str) -> Optional[tuple]:
             if len(parts) >= 2:
                 repo = "/".join(parts[:len(parts)])  # keep nested groups if present
                 # strip .git suffix
-                repo = repo.rstrip(".git").rstrip("/")
+                repo = repo.removesuffix(".git").rstrip("/")
                 _dbg(f"[homepage scan] github candidate -> {repo}")
                 return ("github", repo)
             else:
@@ -1600,7 +1919,7 @@ def _find_repo_link_in_page(url: str) -> Optional[tuple]:
             parts = [s for s in gpath.split("/") if s and s != "-"]
             if len(parts) >= 2:
                 repo = "/".join(parts)  # keep subgroup/project if present
-                repo = repo.rstrip(".git").rstrip("/")
+                repo = repo.removesuffix(".git").rstrip("/")
                 _dbg(f"[homepage scan] gitlab candidate -> host={ghost} repo={repo}")
                 return ("gitlab", ghost, repo)
             else:
@@ -1608,18 +1927,6 @@ def _find_repo_link_in_page(url: str) -> Optional[tuple]:
                 continue
 
     _dbg("[homepage scan] no repo link found")
-    return None
-
-
-
-def _find_github_via_homepage(url: str, pkg_name: str = "") -> Optional[str]:
-    """Legacy GitHub-only helper, kept for callers that only know how to
-    use a GitHub repo path (most call sites). See _find_repo_via_homepage
-    for the GitHub+GitLab-aware version used by the main resolution chain.
-    """
-    found = _find_repo_via_homepage(url, pkg_name)
-    if found and found[0] == "github":
-        return found[1]
     return None
 
 
@@ -1667,105 +1974,12 @@ def _find_repo_via_homepage(url: str, pkg_name: str = "") -> Optional[tuple]:
     return None
 
 
-# -- Probe common GitLab hosts using sensible guesses derived from pkg name --
-# Try this when homepage scanning failed to discover a repo link (covers
-# JS-rendered homepages like apps.gnome.org).
-_EXTRA_GITLAB_HOSTS = [
-    "gitlab.gnome.org",
-    "invent.kde.org",
-    "source.kde.org",
-    "gitlab.com",
-    "gitlab.archlinux.org",
-]
-
-def _probe_known_gitlab_hosts(pkg_name: str) -> Optional[dict]:
-    """
-    Try a few host+path guesses derived from pkg_name against common GitLab
-    instances. If a project exists, call _gitlab_releases() and return its result.
-    Logs attempts with _dbg so the debug expander shows what was tried.
-    """
-    name = (pkg_name or "").strip()
-    if not name:
-        return None
-
-    candidates: list[str] = []
-    # Keep original package name
-    candidates.append(name)
-    # Try without common prefixes
-    for pref in ("gnome-", "gdm-", "lib", "libgnome-"):
-        if name.startswith(pref):
-            candidates.append(name[len(pref):])
-    # Try GNOME group prefix (very common for GNOME apps)
-    candidates.append(f"GNOME/{name}")
-    # Also try GNOME group with the stripped name if we made one
-    if name.startswith("gnome-"):
-        stripped = name[len("gnome-"):]
-        candidates.append(f"GNOME/{stripped}")
-
-    # Deduplicate but keep order
-    seen_cand = []
-    for c in candidates:
-        cclean = c.strip("/")
-        if cclean and cclean not in seen_cand:
-            seen_cand.append(cclean)
-    candidates = seen_cand
-
-    for host in _EXTRA_GITLAB_HOSTS:
-        for cand in candidates:
-            _dbg(f"[host-probe] trying https://{host}/{cand}")
-            # Query the GitLab project endpoint to check existence
-            enc = urllib.parse.quote(cand, safe="")
-            proj = http_get_json(f"https://{host}/api/v4/projects/{enc}")
-            if proj is None:
-                _dbg(f"[host-probe] {host}/{cand} -> no project (or API returned nothing)")
-                continue
-            # Project exists — fetch releases/tags via existing logic
-            _dbg(f"[host-probe] {host}/{cand} -> project exists, attempting _gitlab_releases")
-            try:
-                r = _gitlab_releases(host, cand, pkg_name)
-                if r and r.get("versions"):
-                    _dbg(f"[host-probe] {host}/{cand} -> releases found ✓")
-                    return r
-                _dbg(f"[host-probe] {host}/{cand} -> project exists but no release info")
-            except Exception as e:
-                _dbg(f"[host-probe] {host}/{cand} -> exception in _gitlab_releases: {e}")
-    return None
-
-def _fetch_github_changelog_file(repo: str) -> Optional[dict]:
-    """
-    Suggestion #2: Many projects don't use GitHub Releases at all —
-    they maintain a CHANGELOG.md / NEWS / HISTORY file in the repo root.
-    Try the most common filenames against the default branch via raw.githubusercontent.com.
-    """
-    candidates = [
-        "CHANGELOG.md", "CHANGELOG", "Changelog.md", "CHANGES.md", "CHANGES",
-        "NEWS.md", "NEWS", "HISTORY.md", "HISTORY",
-    ]
-    # Try both common default branches
-    for branch in ("HEAD", "main", "master"):
-        urls = [f"https://raw.githubusercontent.com/{repo}/{branch}/{name}"
-                for name in candidates]
-        pages = _fetch_parallel(urls, timeout=8)
-        for name, url in zip(candidates, urls):
-            body = pages.get(url)
-            if body and len(body) > 50 and "404" not in body[:20]:
-                result = _scrape_github_raw_changelog(body)
-                if result and result.get("versions"):
-                    result["source"] = f"GitHub {name} — {repo}"
-                    return result
-        # If we found the file on this branch (even with no parseable versions),
-        # no need to try other branches
-        if any(pages.values()):
-            break
-    return None
-
-
 def _github_releases(repo: str, _pkg_name: str) -> Optional[dict]:
     data = http_get_json(f"https://api.github.com/repos/{repo}/releases?per_page=8")
     if data and isinstance(data, list) and data:
         versions = []
         for rel in data[:6]:
-            ver  = (rel.get("tag_name") or "").lstrip("vV")
+            ver  = _extract_version_from_tag(rel.get("tag_name") or "")
             date = (rel.get("published_at") or "")[:10]
             body = rel.get("body") or ""
             versions.append({"version": ver, "date": date,
@@ -1773,15 +1987,10 @@ def _github_releases(repo: str, _pkg_name: str) -> Optional[dict]:
         if versions:
             return {"versions": versions, "source": f"GitHub Releases — {repo}"}
 
-    # Suggestion #2: no Releases — try CHANGELOG.md/NEWS file in repo root
-    changelog_result = _fetch_github_changelog_file(repo)
-    if changelog_result:
-        return changelog_result
-
     # Last resort: bare tags with no content
     data = http_get_json(f"https://api.github.com/repos/{repo}/tags?per_page=8")
     if data and isinstance(data, list) and data:
-        return {"versions": [{"version": t.get("name","").lstrip("v"),
+        return {"versions": [{"version": _extract_version_from_tag(t.get("name") or ""),
                               "date": "", "changes": ["See GitHub for release notes."]}
                              for t in data[:6]],
                 "source": f"GitHub tags — {repo}"}
@@ -1815,14 +2024,40 @@ def _is_meaningful_changelog(changes: list[str]) -> bool:
 
 def _extract_version_from_tag(tag_name: str) -> str:
     """
-    Normalise a tag name into a readable version string. Handles:
+    Normalise a tag name into a readable, comparison-friendly version
+    string. Handles:
     - Simple semver: "v3.2.1" -> "3.2.1"
     - GNOME-style: "GNOME_COLOR_MANAGER_3_11_90" -> "3.11.90"
     - Release prefixes: "release-2.5" -> "2.5"
+    - Project/component-name-prefixed tags some repos use as their own
+      convention: "cardpeak-0.8.4" -> "0.8.4"
+
+    Without this last case, a tag like "cardpeak-0.8.4" or
+    "release-5.6.0" was stored verbatim as the "version" — which still
+    sorted/selected correctly as the newest tag, but never matched the
+    installed/pending version during the exact-match confirmation check
+    (_versions_contain_target), since "cardpeak-0.8.4" and "0.8.4" don't
+    compare as the same version even though they clearly are. Stripping
+    happens iteratively (release- prefix, then a generic word- prefix)
+    and stops as soon as the remainder looks like a clean version on its
+    own — or after a few attempts, so a genuinely messy legacy tag (e.g.
+    an old RPM-packaging-style tag with no clean version hiding inside
+    it) isn't mangled further than it already is.
     """
-    t = tag_name.lstrip("vV")
-    # Remove common release- prefix
-    t = re.sub(r'^release[-_]', '', t, flags=re.I)
+    t = (tag_name or "").strip()
+    t = t.removeprefix("v").removeprefix("V")
+
+    for _ in range(3):
+        if _looks_like_clean_version(t):
+            break
+        stripped = re.sub(r'^release[-_]', '', t, flags=re.I)
+        if stripped == t:
+            m = re.match(r'^[A-Za-z][A-Za-z0-9.]*-(.+)$', t)
+            stripped = m.group(1) if m else t
+        if stripped == t:
+            break
+        t = stripped
+
     # GNOME-style: PROJECT_NAME_X_Y_Z -> trailing numeric run with dots
     m = re.search(r'((?:\d+_)+\d+)$', t)
     if m:
@@ -1830,46 +2065,261 @@ def _extract_version_from_tag(tag_name: str) -> str:
     return t
 
 
+def _version_sort_key(ver: str) -> tuple:
+    """
+    Parse a version-ish string into a tuple that sorts correctly in
+    semantic-version order, e.g. "1.10.0" > "1.6.8" > "1.0" > "0.3.27".
+
+    This exists because GitLab's own tag/release ordering can't be
+    trusted at face value — mirrored repos can have all their tags
+    bulk-imported with the same "updated" timestamp, so the API's
+    default sort becomes effectively arbitrary. Every GitLab candidate
+    list is re-sorted with this key rather than trusting API order.
+
+    NOTE: used directly by _target_version_satisfied, which relies on
+    this returning a flat tuple whose *length* reflects how many
+    dot-separated segments the version has (it truncates both sides to
+    the shorter length before comparing, to tolerate packaging-added
+    suffixes like pacman's pkgver "3.0.23_2" vs upstream's "3.0.23").
+    Don't change this return shape — see _tag_selection_key below for a
+    separate, differently-purposed comparison.
+    """
+    t = (ver or "").strip().removeprefix("v").removeprefix("V")
+    parts = re.split(r"[._-]", t)
+    key: list[tuple[int, object]] = []
+    for part in parts:
+        if part.isdigit():
+            key.append((0, int(part)))
+        elif part:
+            key.append((1, part.lower()))
+    return tuple(key)
+
+
+_CLEAN_VERSION_RE = re.compile(
+    r'^v?\d+(\.\d+){0,4}(?:[-.](?:alpha|beta|rc|pre|dev)\d*)?(?:-\d+)?$',
+    re.IGNORECASE)
+
+
+def _looks_like_clean_version(tag: str) -> bool:
+    """
+    True if a tag looks like a straightforward version number (optional
+    v-prefix, dot-separated digits, optionally one pre-release-style or
+    numeric-build suffix) rather than a differently-scoped or legacy tag
+    a repo may carry alongside its real releases — e.g. spice-space's
+    GitLab repo has ancient RPM-packaging-style tags like
+    "spice-server-0.4.2-10.el6" mixed in with its real "0.16.0"-style
+    releases.
+    """
+    return bool(_CLEAN_VERSION_RE.match((tag or "").strip()))
+
+
+def _tag_selection_key(ver: str) -> tuple:
+    """
+    Sort key for choosing the best (most likely genuinely newest) tag
+    among several candidates FROM THE SAME SOURCE — e.g. picking the
+    newest tag out of a repo's own tag list. NOT for comparing against
+    an external target version; use _version_sort_key /
+    _target_version_satisfied for that instead.
+
+    Prioritises clean-looking version tags over legacy/differently-
+    scoped ones. Without this, a tag like "spice-server-0.4.2-10.el6"
+    would outrank the real "0.16.0" release under plain numeric-
+    component comparison: _version_sort_key deliberately ranks any tag
+    with alphabetic segments above any purely-numeric one (so
+    pre-release suffixes like "-rc1" compare sensibly against "1.0.0"),
+    but that same rule means a tag from a completely different, older
+    naming scheme can win purely by containing letters — regardless of
+    its actual embedded numbers.
+    """
+    return (_looks_like_clean_version(ver), _version_sort_key(ver))
+
+
+def _strip_pacman_epoch_pkgrel(v: str) -> str:
+    """
+    Pacman version strings are formatted [epoch:]pkgver-pkgrel, e.g.
+    "1:1.6.8-1" for PipeWire (the "1:" is an epoch, "-1" is the pkgrel).
+    Neither is part of the upstream version number, so both must be
+    stripped before comparing against a tag/release version like
+    "1.6.8" — left in place, the epoch's ":" makes the leading token
+    non-numeric, which _version_sort_key then always ranks *below* any
+    purely-numeric upstream version. That silently broke every
+    target-version check for epoched packages: every correctly-parsed
+    candidate looked "too old" and was rejected, no matter how new it
+    actually was.
+    """
+    v = (v or "").strip()
+    if ":" in v:
+        v = v.split(":", 1)[1]
+    # pkgver itself cannot contain "-" per Arch packaging conventions,
+    # so the final "-" (if any remains) always separates it from pkgrel.
+    if "-" in v:
+        v = v.rsplit("-", 1)[0]
+    return v
+
+
+def _target_version_satisfied(versions: list[dict], target_version: str) -> bool:
+    """
+    Sanity check: does the best (already sorted newest-first) version in
+    `versions` look at least as new as `target_version` — the version
+    pacman/AUR/Flatpak/Snap actually reports as installed or pending?
+    If either side can't be parsed into a meaningful key, we can't
+    validate, so return True rather than block on an odd version string.
+
+    Comparison is truncated to the shorter of the two parsed keys before
+    comparing. Without this, a packaging-added suffix with no upstream
+    equivalent — e.g. VLC's pacman pkgver "3.0.23_2" vs. the upstream
+    page's plain "3.0.23" — would parse to a *longer* key than the
+    upstream version, and Python tuple comparison then treats the
+    shorter, otherwise-identical prefix as "less than" it: a real match
+    would be wrongly flagged as a mismatch on every such package.
+    """
+    if not versions or not target_version:
+        return True
+    tgt_key = _version_sort_key(_strip_pacman_epoch_pkgrel(target_version))
+    if not tgt_key:
+        return True
+    top_key = _version_sort_key(versions[0].get("version", ""))
+    if not top_key:
+        return True
+    n = min(len(tgt_key), len(top_key))
+    return top_key[:n] >= tgt_key[:n]
+
+
+def _versions_contain_target(versions: list[dict], target_version: str) -> bool:
+    """
+    Does the target version (the one pacman/AUR/Flatpak/Snap actually
+    reports as installed or pending) appear, essentially verbatim, among
+    the returned changelog entries? This is a stronger positive signal
+    than _target_version_satisfied's "the newest entry is at least as
+    new" check — a changelog's top entry can outrank the target
+    numerically (an "Unreleased" section, a future-dated heading, a
+    rolling-release testing build newer than what's actually installed)
+    without the changelog actually documenting the specific version the
+    user has. Uses the same epoch/pkgrel stripping and shared-prefix
+    truncation as _target_version_satisfied, so e.g. pacman's
+    "1:1.6.8-1" still matches an upstream "1.6.8" entry.
+    """
+    if not versions or not target_version:
+        return True   # can't judge — don't manufacture a false negative
+    tgt_key = _version_sort_key(_strip_pacman_epoch_pkgrel(target_version))
+    if not tgt_key:
+        return True
+    for v in versions:
+        cand_key = _version_sort_key(v.get("version", ""))
+        if not cand_key:
+            continue
+        n = min(len(tgt_key), len(cand_key))
+        if n and cand_key[:n] == tgt_key[:n]:
+            return True
+    return False
+
+
 # ─── GitLab hosts with known API blocking but git access working ──────────────
 _GIT_FIRST_HOSTS = {"invent.kde.org", "source.kde.org"}
 
 
-def _gitlab_releases(host: str, repo: str, _pkg_name: str) -> Optional[dict]:
+def _gitlab_releases(host: str, repo: str, _pkg_name: str,
+                     target_version: str = "") -> Optional[dict]:
     """
-    Priority:
+    Priority (each candidate list is re-sorted by parsed semantic
+    version, newest first, and checked against `target_version` — the
+    version pacman/AUR/Flatpak/Snap actually reports as installed or
+    pending. A result is only returned immediately if its newest entry
+    looks at least as new as `target_version`; otherwise it's kept as a
+    fallback and the next method is tried).
+
+    This exists because GitLab's own ordering can't be trusted at face
+    value: on mirrored/imported repos, tags can share one bulk-import
+    "updated" timestamp, so the API's default sort is effectively
+    arbitrary — and the "does this tag have a usable message" filter
+    below can end up preferring an old tag with a nicely-written message
+    over the real latest tag, which may have none. Without this check,
+    a project like PipeWire could show a changelog for "1.0" or
+    "0.3.27" even when 1.6.8 is actually current.
+
     1. For known bot-protected hosts, try git fallback first (API blocked).
     2. GitLab Releases API (/releases) — formal Release objects.
     3. Tags API (/repository/tags) with real changelog text.
-    4. A NEWS/CHANGELOG file in the repo root.
-    5. Commit log — last resort.
+    4. A NEWS/CHANGELOG file on the repo's default branch.
+    5. Raw git tags (git ls-remote + each tag's annotation message) —
+       last resort, mainly useful for hosts that block the REST API.
     """
+    best_stale: Optional[dict] = None        # newest entry looked older than target
+    best_unconfirmed: Optional[dict] = None  # satisfies target, but exact version not literally listed
+
+    def _consider(result: Optional[dict]) -> Optional[dict]:
+        """Sort a candidate result's versions newest-first. A result with
+        the exact target version confirmed present returns immediately —
+        the best possible outcome. A result that only satisfies the
+        weaker "newest entry looks at least as new" check is stashed as
+        a fallback rather than returned right away, so a later, better
+        method (e.g. an actual NEWS file) still gets a chance to produce
+        a fully-confirmed match instead of settling for the first
+        plausible-looking one."""
+        nonlocal best_stale, best_unconfirmed
+        if not result or not result.get("versions"):
+            return None
+        result["versions"].sort(
+            key=lambda v: _tag_selection_key(v.get("version", "")), reverse=True)
+        if _target_version_satisfied(result["versions"], target_version):
+            if target_version and not _versions_contain_target(result["versions"], target_version):
+                # Newest entry is at least as new as the target, but the
+                # exact target version isn't in the list — often fine
+                # (rolling-release testing builds, a changelog that
+                # skips versions), but also how a completely different
+                # release lineage (e.g. a project's next major version,
+                # numbered independently of the one actually installed)
+                # can look like a plausible match. Keep searching for a
+                # confirmed result before settling for this.
+                result["_version_unconfirmed"] = True
+                _dbg(f"[gitlab] {result.get('source')}: satisfies target "
+                     f"{target_version!r} but it isn't literally listed — "
+                     f"keeping as fallback, trying next source for a confirmed match")
+                if best_unconfirmed is None:
+                    best_unconfirmed = result
+                return None
+            return result
+        _dbg(f"[gitlab] {result.get('source')}: newest found "
+             f"{result['versions'][0].get('version')!r} looks older than "
+             f"target {target_version!r} — trying next source")
+        if best_stale is None:
+            best_stale = result
+        return None
+
     # For known problematic hosts, try git access before API calls
     if host in _GIT_FIRST_HOSTS:
-        git_result = _gitlab_git_fallback(host, repo, _pkg_name)
-        if git_result and git_result.get("versions"):
-            return git_result
-    
+        r = _consider(_gitlab_git_fallback(host, repo, _pkg_name))
+        if r:
+            return r
+
     encoded = urllib.parse.quote(repo, safe="")
 
-    data = http_get_json(f"https://{host}/api/v4/projects/{encoded}/releases?per_page=6")
+    # 2. Releases API — pull a wider window (20, not 6) so a real
+    # release isn't missed just because GitLab's own ordering puts it
+    # outside the first few entries.
+    data = http_get_json(f"https://{host}/api/v4/projects/{encoded}/releases?per_page=20")
     if data and isinstance(data, list) and data:
         versions = []
-        for rel in data[:6]:
+        for rel in data:
             ver  = _extract_version_from_tag(rel.get("tag_name") or "")
             date = (rel.get("released_at") or rel.get("created_at") or "")[:10]
             desc = rel.get("description") or ""
             changes = _parse_md_changelog(desc)
             versions.append({"version": ver, "date": date,
                              "changes": changes[:10] or [desc[:120].replace("\n"," ")] or [f"Release {ver}"]})
-        # Check if we have meaningful content before returning
-        if versions and any(_is_meaningful_changelog(v.get("changes", [])) for v in versions):
-            return {"versions": versions, "source": f"GitLab Releases — {host}/{repo}"}
+        versions.sort(key=lambda v: _tag_selection_key(v.get("version", "")), reverse=True)
+        versions = versions[:6]
+        if any(_is_meaningful_changelog(v.get("changes", [])) for v in versions):
+            r = _consider({"versions": versions, "source": f"GitLab Releases — {host}/{repo}"})
+            if r:
+                return r
 
-    # Fallback: tags with real commit/annotation messages
-    tags = http_get_json(f"https://{host}/api/v4/projects/{encoded}/repository/tags?per_page=8")
+    # 3. Tags API — same treatment: pull a wider window and re-sort by
+    # parsed version rather than trusting GitLab's "updated" ordering.
+    tags = http_get_json(f"https://{host}/api/v4/projects/{encoded}/repository/tags?per_page=20")
     if tags and isinstance(tags, list) and tags:
-        versions = []
-        for tag in tags[:6]:
+        candidates = []
+        for tag in tags:
             ver = _extract_version_from_tag(tag.get("name") or "")
             msg = tag.get("message") or (tag.get("commit") or {}).get("message", "")
             if not msg or "no release notes" in msg.lower():
@@ -1882,115 +2332,93 @@ def _gitlab_releases(host: str, repo: str, _pkg_name: str) -> Optional[dict]:
                        # actual changelog content.
                        and not re.match(r'^release\s+version\s+[\d.]+\s*$', l.strip(), re.I)]
             if changes:
-                versions.append({
+                candidates.append({
                     "version": ver,
                     "date": ((tag.get("commit") or {}).get("created_at") or "")[:10],
                     "changes": changes[:8],
                 })
-        # Only return if we have meaningful versions (not just version numbers with no changes)
-        if versions and any(_is_meaningful_changelog(v.get("changes", [])) for v in versions):
-            return {"versions": versions, "source": f"GitLab tags — {host}/{repo}"}
+        candidates.sort(key=lambda v: _tag_selection_key(v.get("version", "")), reverse=True)
+        candidates = candidates[:6]
+        if any(_is_meaningful_changelog(v.get("changes", [])) for v in candidates):
+            r = _consider({"versions": candidates, "source": f"GitLab tags — {host}/{repo}"})
+            if r:
+                return r
 
-    # Fallback: NEWS/CHANGELOG file in the repo root (very common for
-    # GNOME and other C/Meson projects that skip GitLab Releases entirely)
-    news = _fetch_gitlab_news_file(host, repo)
-    if news:
-        return news
+    # 4. NEWS/CHANGELOG file in the repo root (very common for GNOME
+    # and other C/Meson projects that skip GitLab Releases entirely).
+    r = _consider(_fetch_gitlab_news_file(host, repo))
+    if r:
+        return r
 
-    # Some GitLab instances block direct raw-file fetches, but git access may
-    # still work. Try reading NEWS/CHANGELOG via git if raw HTTP fetch fails.
-    news_git = _gitlab_fetch_news_file_via_git(host, repo)
-    if news_git:
-        return news_git
+    r = _consider(_gitlab_git_fallback(host, repo, _pkg_name))
+    if r:
+        return r
 
-    git_fallback = _gitlab_git_fallback(host, repo, _pkg_name)
-    if git_fallback:
-        return git_fallback
+    # Nothing produced a fully-confirmed match. Prefer a result that at
+    # least satisfied the "newest entry looks new enough" check over one
+    # that didn't — showing the best available result, clearly labelled,
+    # beats nothing at all.
+    if best_unconfirmed:
+        return best_unconfirmed
+    if best_stale:
+        best_stale["source"] += "  [may not include the latest release]"
+        best_stale["_version_mismatch"] = True
+        return best_stale
+    return None
 
-    # Last resort: raw commit log, filtered the same way the Arch GitLab
-    # fallback is — drops PGP noise and non-meaningful housekeeping commits.
-    commits = http_get_json(
-        f"https://{host}/api/v4/projects/{encoded}/repository/commits?per_page=15")
-    if commits and isinstance(commits, list) and commits:
-        versions, seen = [], set()
-        for c in commits:
-            title = c.get("title", "")
-            date  = (c.get("committed_date") or "")[:10]
-            if _is_pgp_garbage(title) or not title.strip():
-                continue
-            if not _is_meaningful_commit(title):
-                continue
-            m   = re.search(r"(\d+[\.\d]+(?:-\d+)?)", title)
-            ver = m.group(1) if m else date
-            if ver not in seen:
-                seen.add(ver)
-                versions.append({"version": ver, "date": date, "changes": [title]})
-            if len(versions) >= 6:
-                break
-        if versions:
-            return {"versions": versions, "source": f"GitLab commits — {host}/{repo}"}
 
+def _gitlab_default_branch(host: str, repo: str) -> Optional[str]:
+    """
+    Look up the project's actual default branch via the GitLab API, so
+    NEWS/CHANGELOG lookups try the real default branch first instead of
+    only guessing common names — avoids picking up a stale file from an
+    unrelated branch that happens to be tried earlier in the guess list.
+    """
+    encoded = urllib.parse.quote(repo, safe="")
+    data = http_get_json(f"https://{host}/api/v4/projects/{encoded}")
+    if data and isinstance(data, dict):
+        db = data.get("default_branch")
+        if db:
+            return db
     return None
 
 
 def _fetch_gitlab_news_file(host: str, repo: str) -> Optional[dict]:
-    """Try NEWS/CHANGELOG files via GitLab's raw-file endpoint, across
-    common default branch names and filenames."""
-    encoded = urllib.parse.quote(repo, safe="")
+    """Try NEWS/CHANGELOG files via GitLab's raw-file endpoint, on the
+    project's real default branch only (looked up via the API; falls
+    back to "main" as a single guess if that lookup itself fails)."""
     filenames = ["NEWS", "CHANGELOG", "NEWS.md", "CHANGELOG.md",
                  "CHANGES", "CHANGES.md", "HISTORY", "HISTORY.md"]
-    # Try common branch patterns; include develop/dev for active projects
-    branches  = ["main", "master", "develop", "dev", "HEAD", "release"]
-    urls = [
-        f"https://{host}/{repo}/-/raw/{branch}/{fname}"
-        for branch in branches for fname in filenames
-    ]
+    branch = _gitlab_default_branch(host, repo) or "main"
+    urls = [f"https://{host}/{repo}/-/raw/{branch}/{fname}" for fname in filenames]
     pages = _fetch_parallel(urls, timeout=10)
+    found_any_body = False
     for url in urls:
         body = pages.get(url)
         if body and len(body) > 50:
+            found_any_body = True
             low = body.lower()
             if "<html" in low or _is_bot_protection_page(body):
                 continue
-            result = _scrape_text_file(body) if "\n##" not in body[:2000] \
-                     else _scrape_github_raw_changelog(body)
+            result = _scrape_github_raw_changelog(body) if _looks_like_markdown_changelog(body) \
+                     else _scrape_text_file(body)
             if result and result.get("versions"):
+                # Files aren't guaranteed to list entries strictly
+                # newest-first (merges/edits can leave them out of
+                # order) — re-sort by parsed version to be sure.
+                result["versions"].sort(
+                    key=lambda v: _tag_selection_key(v.get("version", "")),
+                    reverse=True)
                 fname = url.rsplit("/", 1)[-1]
                 result["source"] = f"GitLab {fname} — {host}/{repo}"
+                _dbg(f"[gitlab] NEWS/CHANGELOG file (HTTP): found and parsed {fname}")
                 return result
-    return None
-
-
-def _gitlab_fetch_news_file_via_git(host: str, repo: str) -> Optional[dict]:
-    if not cmd_exists("git"):
-        return None
-    repo_url = f"https://{host}/{repo}.git"
-    filenames = ["NEWS", "CHANGELOG", "NEWS.md", "CHANGELOG.md",
-                 "CHANGES", "CHANGES.md", "HISTORY", "HISTORY.md"]
-    branches = ["main", "master", "develop", "dev", "release", "HEAD"]
-
-    with tempfile.TemporaryDirectory(prefix="pakchan-git-") as tmpdir:
-        if run(["git", "init", "--bare", tmpdir])[2] != 0:
-            return None
-        git = ["git", "-C", tmpdir]
-        if run(git + ["remote", "add", "origin", repo_url])[2] != 0:
-            return None
-
-        for branch in branches:
-            fetch_rc = run(git + ["fetch", "--quiet", "--depth", "1",
-                                  "origin", f"refs/heads/{branch}:refs/remotes/origin/{branch}"])[2]
-            if fetch_rc != 0:
-                continue
-            for fname in filenames:
-                show_rc = run(git + ["show", f"refs/remotes/origin/{branch}:{fname}"])
-                if show_rc[2] != 0 or not show_rc[0]:
-                    continue
-                body = show_rc[0]
-                result = _scrape_text_file(body) if "\n##" not in body[:2000] \
-                         else _scrape_github_raw_changelog(body)
-                if result and result.get("versions"):
-                    result["source"] = f"GitLab {fname} via git — {host}/{repo}"
-                    return result
+    if found_any_body:
+        _dbg(f"[gitlab] NEWS/CHANGELOG file (HTTP): found a file but couldn't "
+             f"parse any versions from it")
+    else:
+        _dbg(f"[gitlab] NEWS/CHANGELOG file (HTTP): none of the common "
+             f"filenames exist on branch {branch!r} at {host}/{repo}")
     return None
 
 
@@ -2018,19 +2446,9 @@ def _gitlab_git_fallback(host: str, repo: str, _pkg_name: str) -> Optional[dict]
     if not tags:
         return None
 
-    def version_key(tag_name: str):
-        t = tag_name.lstrip("vV")
-        parts = re.split(r"[._-]", t)
-        key: list[tuple[int, object]] = []
-        for part in parts:
-            if part.isdigit():
-                # Numeric parts sort before alpha parts
-                key.append((0, int(part)))
-            else:
-                key.append((1, part.lower()))
-        return tuple(key)
-
-    tags.sort(key=lambda tr: version_key(tr[0]), reverse=True)
+    # Use the shared version key (also used to re-sort GitLab API results)
+    # rather than a separate local copy.
+    tags.sort(key=lambda tr: _tag_selection_key(tr[0]), reverse=True)
     tags = tags[:6]
     versions = []
     with tempfile.TemporaryDirectory(prefix="pakchan-git-") as tmpdir:
@@ -2091,8 +2509,11 @@ def _upstream_changelog(url: str, pkg_name: str, version: str) -> Optional[dict]
     # `_upstream_changelog` directly (tests and integrations) still work.
     if name in KNOWN_CUSTOM:
         entry = KNOWN_CUSTOM[name]
-        r = _scrape_custom(pkg_name, entry)
-        if r and r.get("versions"): return r
+        r = _scrape_custom(pkg_name, entry, version)
+        if r and r.get("versions") and _target_version_satisfied(r["versions"], version):
+            if version and not _versions_contain_target(r["versions"], version):
+                r["_version_unconfirmed"] = True
+            return r
         url = entry.get("url", "")
         if url:
             return {
@@ -2104,6 +2525,11 @@ def _upstream_changelog(url: str, pkg_name: str, version: str) -> Optional[dict]
             }
     if name in KNOWN_RELEASE_PAGES:
         page_url = KNOWN_RELEASE_PAGES[name]
+        r = _generic_release_page_scraper(page_url, pkg_name)
+        if r and r.get("versions") and _target_version_satisfied(r["versions"], version):
+            if version and not _versions_contain_target(r["versions"], version):
+                r["_version_unconfirmed"] = True
+            return r
         return {
             "versions": [{"version": version, "date": "",
                           "changes": [f"See {page_url} for details."]}],
@@ -2146,7 +2572,7 @@ def _upstream_changelog(url: str, pkg_name: str, version: str) -> Optional[dict]
     # 5. Direct GitLab URL
     gl = re.search(r"(gitlab\.[^/\s]+)/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", url)
     if gl:
-        r = _gitlab_releases(gl.group(1), gl.group(2).removesuffix(".git"), pkg_name)
+        r = _gitlab_releases(gl.group(1), gl.group(2).removesuffix(".git"), pkg_name, version)
         if r and r.get("versions"): return r
     # 3. Homepage scraping (GitHub or GitLab — whichever the homepage links to)
     fallback_link = None
@@ -2157,7 +2583,7 @@ def _upstream_changelog(url: str, pkg_name: str, version: str) -> Optional[dict]
             if r and r.get("versions"): return r
             fallback_link = f"https://github.com/{found[1]}/releases"
         else:
-            r = _gitlab_releases(found[1], found[2], pkg_name)
+            r = _gitlab_releases(found[1], found[2], pkg_name, version)
             if r and r.get("versions"): return r
             fallback_link = f"https://{found[1]}/{found[2]}/-/releases"
     if fallback_link:
@@ -2174,47 +2600,41 @@ def _upstream_changelog(url: str, pkg_name: str, version: str) -> Optional[dict]
 
 def _check_mappings_first(pkg: Package) -> Optional[dict]:
     """
-    Always check custom and release_pages mappings BEFORE any other source.
+    Always check every mapping type BEFORE any other source, in this
+    order: github -> gitlab -> custom (mantisbt/text_file/github_raw/
+    mozilla/filezilla) -> release_pages.
 
     For "release_pages" entries, scraping arbitrary third-party sites
     proved too unreliable across different HTML structures — instead we
     show a direct, clickable link to the official changelog page. This is
     simple and always correct, even if it requires one extra click.
 
-    For "custom" entries (mantisbt, text_file, github_raw), the parser
-    is still attempted since these are simpler, well-defined formats.
+    For "custom" entries, the parser is still attempted since these are
+    simpler, well-defined formats.
     """
     name = pkg.name.lower()
 
-    # Custom parser (mantisbt, text_file, github_raw, …)
-    if name in KNOWN_CUSTOM:
-        entry = KNOWN_CUSTOM[name]
-        url   = entry.get("url", "")
-        r     = _scrape_custom(pkg.name, entry)
-        if r and r.get("versions"):
-            return r
-        # Mapping exists but scraping failed — return URL fallback, not None
-        return {
-            "versions": [{"version": pkg.version, "date": "",
-                          "changes": [f"See {url} for details."]}],
-            "source": f"Custom ({entry.get('parser', '')}) — {url}",
-        }
+    target_version = pkg.new_version or pkg.version
 
-    # Dedicated release page — show a direct link, no scraping attempted.
-    if name in KNOWN_RELEASE_PAGES:
-        url = KNOWN_RELEASE_PAGES[name]
+    if name in KNOWN_GITHUB_REPOS:
+        repo = KNOWN_GITHUB_REPOS[name]
+        r = _github_releases(repo, pkg.name)
+        if r and r.get("versions"):
+            if target_version and not _versions_contain_target(r["versions"], target_version):
+                r["_version_unconfirmed"] = True
+            return r
+        url = f"https://github.com/{repo}/releases"
         return {
             "versions": [{"version": pkg.version, "date": "",
                           "changes": [f"See {url} for details."]}],
-            "source": f"Release page — {url}",
+            "source": f"GitHub repo mapping — {repo}",
             "_link_only": True,
             "_link_url": url,
         }
 
-    # Known GitLab repo mapping from mappings.json should beat local AppStream.
     if name in KNOWN_GITLAB_REPOS:
         host, repo = KNOWN_GITLAB_REPOS[name]
-        r = _gitlab_releases(host, repo, pkg.name)
+        r = _gitlab_releases(host, repo, pkg.name, target_version)
         if r and r.get("versions"):
             return r
         url = f"https://{host}/{repo}/-/releases"
@@ -2226,16 +2646,46 @@ def _check_mappings_first(pkg: Package) -> Optional[dict]:
             "_link_url": url,
         }
 
-    if name in KNOWN_GITHUB_REPOS:
-        repo = KNOWN_GITHUB_REPOS[name]
-        r = _github_releases(repo, pkg.name)
-        if r and r.get("versions"):
+    # Custom parser (mantisbt, text_file, github_raw, …)
+    if name in KNOWN_CUSTOM:
+        entry = KNOWN_CUSTOM[name]
+        url   = entry.get("url", "")
+        r     = _scrape_custom(pkg.name, entry, target_version)
+        # Unlike the gitlab parser branch (which validates internally via
+        # _gitlab_releases), the other custom parsers (text_file,
+        # github_raw, mozilla, filezilla) had no target-version check at
+        # all — a wrong/unrelated page match would be shown unvalidated.
+        if r and r.get("versions") and _target_version_satisfied(r["versions"], target_version):
+            if target_version and not _versions_contain_target(r["versions"], target_version):
+                r["_version_unconfirmed"] = True
             return r
-        url = f"https://github.com/{repo}/releases"
+        # Mapping exists but scraping failed, or didn't pass the version
+        # check — return URL fallback, not the unvalidated result.
         return {
             "versions": [{"version": pkg.version, "date": "",
                           "changes": [f"See {url} for details."]}],
-            "source": f"GitHub repo mapping — {repo}",
+            "source": f"Custom ({entry.get('parser', '')}) — {url}",
+        }
+
+    # Dedicated release page — try the generic heuristic scraper first;
+    # only fall back to a plain link if it isn't confident enough to trust.
+    if name in KNOWN_RELEASE_PAGES:
+        url = KNOWN_RELEASE_PAGES[name]
+        r = _generic_release_page_scraper(url, pkg.name)
+        # Unlike the GitLab resolver, there's no further fallback method
+        # to try here — so a version mismatch means we likely scraped the
+        # wrong thing entirely (a different app's blog post, an old news
+        # item, etc). Showing that with a warning label wasn't enough in
+        # practice: wrong content is worse than an honest link, so this
+        # discards the result and falls through to the plain link instead.
+        if r and r.get("versions") and _target_version_satisfied(r["versions"], target_version):
+            if target_version and not _versions_contain_target(r["versions"], target_version):
+                r["_version_unconfirmed"] = True
+            return r
+        return {
+            "versions": [{"version": pkg.version, "date": "",
+                          "changes": [f"See {url} for details."]}],
+            "source": f"Release page — {url}",
             "_link_only": True,
             "_link_url": url,
         }
@@ -2286,45 +2736,6 @@ def _is_noise_line(text: str) -> bool:
     return False
 
 
-# Suggestion #5: sentiment-based commit filtering — separates noisy VCS
-# housekeeping commits ("Merge branch", "Bump version", "chore: ...")
-# from genuinely user-facing changes, when falling back to raw commit logs.
-_NOISE_COMMIT_PATTERNS = [
-    r'^Merge (branch|pull request)',
-    r'^Bump version',
-    r'^Update (changelog|readme|license)',
-    r'^\d+\.\d+\.\d+$',          # bare version number
-    r'^[Ww]ip\b',
-    r'^fixup!',
-    r'^squash!',
-    r'^[Tt]ypo',
-    r'^[Cc]leanup',
-    r'^[Rr]efactor',
-    r'^(chore|ci|docs|style|test)(\(.*\))?:',   # conventional commits, non feat/fix
-    r'^[a-f0-9]{7,}$',           # bare commit hash
-]
-_USEFUL_COMMIT_PATTERNS = [
-    r'^(feat|fix|perf|security)(\(.*\))?:',     # conventional commits
-    r'\b(add|fix|remove|improve|update|change|implement|support|allow)\b',
-    r'\b(crash|bug|error|issue|problem|vulnerability|CVE)\b',
-    r'\b(feature|option|setting|preference|config)\b',
-]
-
-
-def _is_meaningful_commit(message: str) -> bool:
-    """Check if a commit message describes a user-visible change."""
-    message = message.strip()
-    if not message:
-        return False
-    for pattern in _NOISE_COMMIT_PATTERNS:
-        if re.match(pattern, message):
-            return False
-    for pattern in _USEFUL_COMMIT_PATTERNS:
-        if re.search(pattern, message, re.IGNORECASE):
-            return True
-    return False
-
-
 def fetch_changelog_pacman(pkg: Package) -> dict:
     # 1. Always check mappings first
     r = _check_mappings_first(pkg)
@@ -2340,7 +2751,20 @@ def fetch_changelog_pacman(pkg: Package) -> dict:
         return r
     _dbg("[2] local AppStream: no usable file")
 
-    # 3. Fetch URL from pacman -Si if not already set
+    # Steps 4/5 (known GitLab/GitHub mapping) are skipped here: this
+    # point is only reached when _check_mappings_first (step 1) already
+    # returned nothing, which — by construction — means the package
+    # name isn't in KNOWN_GITLAB_REPOS or KNOWN_GITHUB_REPOS either (that
+    # function checks both exhaustively and always returns a result,
+    # real or link-fallback, whenever either matches). Re-checking them
+    # here could never do anything.
+    name = pkg.name.lower()
+    target_version = pkg.new_version or pkg.version
+
+    # 3. Direct GitHub/GitLab URL — pkg.url is already loaded (read from
+    # the local pacman database at package-load time, same URL shown in
+    # the Info tab); pacman -Si is only queried as a fallback on the rare
+    # chance it's genuinely missing, not as a matter of course.
     if not pkg.url:
         out, _, _ = run(["pacman", "-Si", pkg.name])
         for line in out.splitlines():
@@ -2348,82 +2772,53 @@ def fetch_changelog_pacman(pkg: Package) -> dict:
                 pkg.url = line.partition(":")[2].strip()
                 break
     _dbg(f"[3] package URL: {pkg.url or '(none)'}")
-
-    # 4. Known GitLab repo
-    name = pkg.name.lower()
-    if name in KNOWN_GITLAB_REPOS:
-        host, repo = KNOWN_GITLAB_REPOS[name]
-        r = _gitlab_releases(host, repo, pkg.name)
-        if r and r.get("versions"):
-            _dbg(f"[4] mappings.json gitlab entry: hit ({host}/{repo})")
-            return r
-        _dbg(f"[4] mappings.json gitlab entry {host}/{repo}: no usable data")
-    else:
-        _dbg("[4] mappings.json gitlab entry: none")
-
-    # 5. Known GitHub repo
-    if name in KNOWN_GITHUB_REPOS:
-        r = _github_releases(KNOWN_GITHUB_REPOS[name], pkg.name)
-        if r and r.get("versions"):
-            _dbg(f"[5] mappings.json github entry: hit ({KNOWN_GITHUB_REPOS[name]})")
-            return r
-        _dbg(f"[5] mappings.json github entry {KNOWN_GITHUB_REPOS[name]}: no usable data")
-    else:
-        _dbg("[5] mappings.json github entry: none")
-
-    # 6. Direct GitHub/GitLab URL in package metadata
     if pkg.url:
         gh = re.search(r"github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", pkg.url)
         if gh:
             repo = gh.group(1).rstrip("/").removesuffix(".git")
             r = _github_releases(repo, pkg.name)
             if r and r.get("versions"):
-                _dbg(f"[6] direct GitHub URL: hit ({repo})")
+                _dbg(f"[3] direct GitHub URL: hit ({repo})")
                 return r
-            _dbg(f"[6] direct GitHub URL {repo}: no usable data")
+            _dbg(f"[3] direct GitHub URL {repo}: no usable data")
         gl = re.search(r"(gitlab\.[^/\s]+)/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", pkg.url)
         if gl:
             host, repo = gl.group(1), gl.group(2).removesuffix(".git")
-            r = _gitlab_releases(host, repo, pkg.name)
+            r = _gitlab_releases(host, repo, pkg.name, target_version)
             if r and r.get("versions"):
-                _dbg(f"[6] direct GitLab URL: hit ({host}/{repo})")
+                _dbg(f"[3] direct GitLab URL: hit ({host}/{repo})")
                 return r
-            _dbg(f"[6] direct GitLab URL {host}/{repo}: no usable data")
+            _dbg(f"[3] direct GitLab URL {host}/{repo}: no usable data")
         if not gh and not gl:
-            _dbg("[6] package URL is not a direct GitHub/GitLab link")
+            _dbg("[3] package URL is not a direct GitHub/GitLab link")
     else:
-        _dbg("[6] no package URL to check")
+        _dbg("[3] no package URL to check")
 
-    # 7. Homepage scraping for an indirect GitHub/GitLab link (e.g.
+    # 4. Homepage scraping for an indirect GitHub/GitLab link (e.g.
     #    apps.gnome.org/Calendar, which links out to gitlab.gnome.org).
-    #    This MUST run before the Arch packaging fallback below — Arch's
-    #    packaging repo only ever contains packaging metadata (version
-    #    bumps, rebuild notes), never the upstream project's real
-    #    changelog, so it should be a last resort, not a shortcut that
-    #    pre-empts finding the real upstream source.
     fallback_link = None
     if pkg.url:
         found = _find_repo_via_homepage(pkg.url, pkg.name)
         if found:
             if found[0] == "github":
-                _dbg(f"[7] homepage scan found GitHub repo: {found[1]}")
+                _dbg(f"[4] homepage scan found GitHub repo: {found[1]}")
                 r = _github_releases(found[1], pkg.name)
                 if r and r.get("versions"):
-                    _dbg("[7] homepage-discovered repo: hit")
+                    _dbg("[4] homepage-discovered repo: hit")
                     return r
                 fallback_link = f"https://github.com/{found[1]}/releases"
             else:
-                _dbg(f"[7] homepage scan found GitLab repo: {found[1]}/{found[2]}")
-                r = _gitlab_releases(found[1], found[2], pkg.name)
+                _dbg(f"[4] homepage scan found GitLab repo: {found[1]}/{found[2]}")
+                r = _gitlab_releases(found[1], found[2], pkg.name, target_version)
                 if r and r.get("versions"):
-                    _dbg("[7] homepage-discovered repo: hit")
+                    _dbg("[4] homepage-discovered repo: hit")
                     return r
                 fallback_link = f"https://{found[1]}/{found[2]}/-/releases"
-            _dbg("[7] homepage-discovered repo: no usable data")
+            _dbg("[4] homepage-discovered repo: no usable data")
         else:
-            _dbg("[7] homepage scan: no repo link found (or rejected by plausibility check)")
+            _dbg("[4] homepage scan: no repo link found (or rejected by plausibility check)")
     else:
-        _dbg("[7] no package URL to scan")
+        _dbg("[4] no package URL to scan")
 
     if fallback_link:
         return {
@@ -2434,65 +2829,16 @@ def fetch_changelog_pacman(pkg: Package) -> dict:
             "_link_url": fallback_link,
         }
 
-    # 8. Arch packaging GitLab — absolute last resort. Filters PGP noise
-    # and non-meaningful housekeeping commits, but this only ever reflects
-    # *packaging* changes (version bumps, rebuilds), not the real upstream
-    # changelog, so every prior step is strictly more useful when it works.
-    encoded  = urllib.parse.quote(f"archlinux/packaging/packages/{pkg.name}", safe="")
-    base_url = f"https://gitlab.archlinux.org/api/v4/projects/{encoded}"
-
-    tags = http_get_json(f"{base_url}/repository/tags?per_page=6")
-    if tags and isinstance(tags, list):
-        versions = []
-        for tag in tags[:5]:
-            ver = (tag.get("name") or "").lstrip("v")
-            msg = tag.get("message") or (tag.get("commit") or {}).get("message", "")
-            changes = [
-                l.strip("- ").strip()
-                for l in msg.splitlines()
-                if l.strip()
-                and not l.strip().startswith("#")
-                and not _is_pgp_garbage(l)
-                and len(l.strip()) < 200
-            ]
-            if changes:
-                versions.append({
-                    "version": ver,
-                    "date": ((tag.get("commit") or {}).get("created_at") or "")[:10],
-                    "changes": changes[:6],
-                })
-        if versions:
-            _dbg("[8] Arch packaging GitLab tags: hit")
-            return {"versions": versions,
-                    "source": f"Arch Linux GitLab — packaging/packages/{pkg.name}"}
-    _dbg("[8] Arch packaging GitLab tags: no usable data")
-
-    commits = http_get_json(f"{base_url}/repository/commits?per_page=15")
-    if commits and isinstance(commits, list):
-        versions, seen = [], set()
-        for c in commits:
-            title = c.get("title", "")
-            date  = (c.get("committed_date") or "")[:10]
-            # Filter PGP noise AND non-meaningful housekeeping commits
-            if _is_pgp_garbage(title) or not title.strip():
-                continue
-            if not _is_meaningful_commit(title):
-                continue
-            m   = re.search(r"(\d+[\.\d]+-\d+)", title)
-            ver = m.group(1) if m else date
-            if ver not in seen:
-                seen.add(ver)
-                versions.append({"version": ver, "date": date, "changes": [title]})
-            if len(versions) >= 5:
-                break
-        if versions:
-            _dbg("[8] Arch packaging GitLab commits: hit")
-            return {"versions": versions,
-                    "source": f"Arch Linux GitLab — packaging/packages/{pkg.name}"}
-    _dbg("[8] Arch packaging GitLab commits: no usable data — giving up")
-
+    # Nothing found. Unlike AUR (which has its own PKGBUILD history via
+    # AUR's cgit log as a last resort), pacman packages don't get an
+    # "Arch packaging GitLab" fallback here — that repo only ever
+    # reflects packaging changes (version bumps, rebuilds), not the
+    # actual upstream changelog, and wasn't judged useful enough to be
+    # worth the extra network round-trip for official-repo packages.
     return {"versions": [{"version": pkg.version, "date": "",
-                          "changes": ["Changelog not found."]}], "source": "unavailable"}
+                          "changes": ["Changelog not found."]}],
+            "source": "unavailable",
+            "_manual_check_url": pkg.url or None}
 
 
 def fetch_changelog_aur(pkg: Package) -> dict:
@@ -2510,57 +2856,43 @@ def fetch_changelog_aur(pkg: Package) -> dict:
         return r
     _dbg("[2] local AppStream: no usable file")
 
-    # 3. Fetch URL from AUR RPC if not set
+    # Step 4 (known GitLab/GitHub mapping) is skipped here: this point
+    # is only reached when _check_mappings_first (step 1) already
+    # returned nothing, which — by construction — means the package
+    # name isn't in KNOWN_GITLAB_REPOS or KNOWN_GITHUB_REPOS either.
+    name = pkg.name.lower()
+    target_version = pkg.new_version or pkg.version
+
+    # 3. Direct GitHub/GitLab URL — pkg.url is already loaded (fetched at
+    # package-load time via AUR RPC, same URL shown in the Info tab); a
+    # fresh RPC call is only made as a fallback if it's genuinely missing.
     if not pkg.url:
         data = http_get_json(
             f"https://aur.archlinux.org/rpc/v5/info/{urllib.parse.quote(pkg.name)}")
         if data and data.get("results"):
             pkg.url = data["results"][0].get("URL", "")
     _dbg(f"[3] package URL: {pkg.url or '(none)'}")
-
-    # 4. Known mappings (GitHub/GitLab)
-    name = pkg.name.lower()
-    if name in KNOWN_GITLAB_REPOS:
-        host, repo = KNOWN_GITLAB_REPOS[name]
-        r = _gitlab_releases(host, repo, pkg.name)
-        if r and r.get("versions"):
-            _dbg(f"[4] mappings.json gitlab entry: hit ({host}/{repo})")
-            return r
-        _dbg(f"[4] mappings.json gitlab entry {host}/{repo}: no usable data")
-    else:
-        _dbg("[4] mappings.json gitlab entry: none")
-
-    if name in KNOWN_GITHUB_REPOS:
-        r = _github_releases(KNOWN_GITHUB_REPOS[name], pkg.name)
-        if r and r.get("versions"):
-            _dbg(f"[4] mappings.json github entry: hit ({KNOWN_GITHUB_REPOS[name]})")
-            return r
-        _dbg(f"[4] mappings.json github entry {KNOWN_GITHUB_REPOS[name]}: no usable data")
-    else:
-        _dbg("[4] mappings.json github entry: none")
-
-    # 5. Direct GitHub/GitLab URL
     if pkg.url:
         gh = re.search(r"github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", pkg.url)
         if gh:
             repo = gh.group(1).rstrip("/").removesuffix(".git")
             r = _github_releases(repo, pkg.name)
             if r and r.get("versions"):
-                _dbg(f"[5] direct GitHub URL: hit ({repo})")
+                _dbg(f"[3] direct GitHub URL: hit ({repo})")
                 return r
-            _dbg(f"[5] direct GitHub URL {repo}: no usable data")
+            _dbg(f"[3] direct GitHub URL {repo}: no usable data")
         gl = re.search(r"(gitlab\.[^/\s]+)/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", pkg.url)
         if gl:
             host, repo = gl.group(1), gl.group(2).removesuffix(".git")
-            r = _gitlab_releases(host, repo, pkg.name)
+            r = _gitlab_releases(host, repo, pkg.name, target_version)
             if r and r.get("versions"):
-                _dbg(f"[5] direct GitLab URL: hit ({host}/{repo})")
+                _dbg(f"[3] direct GitLab URL: hit ({host}/{repo})")
                 return r
-            _dbg(f"[5] direct GitLab URL {host}/{repo}: no usable data")
+            _dbg(f"[3] direct GitLab URL {host}/{repo}: no usable data")
     else:
-        _dbg("[5] no package URL to check")
+        _dbg("[3] no package URL to check")
 
-    # 6. Homepage scraping (GitHub or GitLab) — try this BEFORE the AUR
+    # 4. Homepage scraping (GitHub or GitLab) — try this BEFORE the AUR
     # cgit fallback below. AUR cgit only ever shows PKGBUILD packaging
     # commits, never the upstream project's real changelog, so it should
     # be a last resort rather than something that pre-empts finding the
@@ -2570,24 +2902,24 @@ def fetch_changelog_aur(pkg: Package) -> dict:
         found = _find_repo_via_homepage(pkg.url, pkg.name)
         if found:
             if found[0] == "github":
-                _dbg(f"[6] homepage scan found GitHub repo: {found[1]}")
+                _dbg(f"[5] homepage scan found GitHub repo: {found[1]}")
                 r = _github_releases(found[1], pkg.name)
                 if r and r.get("versions"):
-                    _dbg("[6] homepage-discovered repo: hit")
+                    _dbg("[4] homepage-discovered repo: hit")
                     return r
                 fallback_link = f"https://github.com/{found[1]}/releases"
             else:
-                _dbg(f"[6] homepage scan found GitLab repo: {found[1]}/{found[2]}")
-                r = _gitlab_releases(found[1], found[2], pkg.name)
+                _dbg(f"[4] homepage scan found GitLab repo: {found[1]}/{found[2]}")
+                r = _gitlab_releases(found[1], found[2], pkg.name, target_version)
                 if r and r.get("versions"):
-                    _dbg("[6] homepage-discovered repo: hit")
+                    _dbg("[4] homepage-discovered repo: hit")
                     return r
                 fallback_link = f"https://{found[1]}/{found[2]}/-/releases"
-            _dbg("[6] homepage-discovered repo: no usable data")
+            _dbg("[4] homepage-discovered repo: no usable data")
         else:
-            _dbg("[6] homepage scan: no repo link found (or rejected by plausibility check)")
+            _dbg("[4] homepage scan: no repo link found (or rejected by plausibility check)")
     else:
-        _dbg("[6] no package URL to scan")
+        _dbg("[4] no package URL to scan")
 
     if fallback_link:
         return {
@@ -2598,7 +2930,7 @@ def fetch_changelog_aur(pkg: Package) -> dict:
             "_link_url": fallback_link,
         }
 
-    # 7. AUR cgit fallback (PKGBUILD commit history) — absolute last resort
+    # 5. AUR cgit fallback (PKGBUILD commit history) — absolute last resort
     versions = []
     body = http_get(
         f"https://aur.archlinux.org/cgit/aur.git/log/"
@@ -2620,12 +2952,14 @@ def fetch_changelog_aur(pkg: Package) -> dict:
                 break
 
     if versions:
-        _dbg("[7] AUR cgit log: hit")
-    else:
-        _dbg("[7] AUR cgit log: no usable data — giving up")
-        versions = [{"version": pkg.version, "date": "",
-                     "changes": ["No commit history found on AUR."]}]
-    return {"versions": versions, "source": "AUR cgit log"}
+        _dbg("[5] AUR cgit log: hit")
+        return {"versions": versions, "source": "AUR cgit log"}
+
+    _dbg("[5] AUR cgit log: no usable data — giving up")
+    return {"versions": [{"version": pkg.version, "date": "",
+                          "changes": ["No commit history found on AUR."]}],
+            "source": "unavailable",
+            "_manual_check_url": pkg.url or None}
 
 
 def fetch_changelog_flatpak(pkg: Package) -> dict:
@@ -2690,6 +3024,8 @@ def fetch_changelog_flatpak(pkg: Package) -> dict:
     if not versions:
         versions = [{"version": pkg.version, "date": "",
                      "changes": ["Release notes not available on Flathub."]}]
+        return {"versions": versions, "source": "Flathub AppStream metadata",
+                "_manual_check_url": pkg.url or None}
     return {"versions": versions, "source": "Flathub AppStream metadata"}
 
 
@@ -2737,6 +3073,8 @@ def fetch_changelog_snap(pkg: Package) -> dict:
     if not versions:
         versions = [{"version": pkg.version, "date": "",
                      "changes": ["Changelog not available via Snap Store API."]}]
+        return {"versions": versions, "source": "Snap Store",
+                "_manual_check_url": pkg.url or None}
     return {"versions": versions, "source": "Snap Store"}
 
 
@@ -2777,12 +3115,37 @@ def fetch_changelog(pkg: Package) -> dict:
 
 # ─── GTK Application ──────────────────────────────────────────────────────────
 
-SORT_OPTIONS = ["Relevance", "A → Z", "Z → A", "Size ↓", "Updates first"]
+def _resolve_source_url(changelog: dict) -> Optional[str]:
+    """
+    Best-effort extraction of a real URL for the "Source:" line, so it can
+    be shown as a clickable link instead of plain text. Prefers an explicit
+    `_link_url` (already set on link-only results), then a full URL
+    embedded directly in the `source` text, then reconstructs one for
+    sources that only name a repo path (e.g. "GitHub Releases — owner/repo").
+    Returns None if nothing usable can be found — caller falls back to a
+    plain (non-clickable) label in that case.
+    """
+    if changelog.get("_link_url"):
+        return changelog["_link_url"]
+    source = changelog.get("source", "") or ""
+    m = re.search(r'https?://\S+', source)
+    if m:
+        return m.group(0).rstrip(".,)]")
+    m = re.search(r'GitHub[^—]*—\s*([\w.-]+/[\w.-]+)', source)
+    if m:
+        return f"https://github.com/{m.group(1)}"
+    m = re.search(r'GitLab[^—]*—\s*([\w.\-]+)/([\w.\-]+/[\w.\-]+)', source)
+    if m:
+        return f"https://{m.group(1)}/{m.group(2)}"
+    return None
+
+
+SORT_OPTIONS = ["Relevance", "A → Z", "Z → A", "Size ↓", "Size ↑", "Updates first"]
 
 
 class PakchanApp(Adw.Application):
     def __init__(self):
-        super().__init__(application_id="com.example.Pakchan")
+        super().__init__(application_id="io.github.dodog.Pakchan")
         self.connect("activate", self.on_activate)
 
     def on_activate(self, app):
@@ -2798,7 +3161,7 @@ class PakchanWindow(Adw.ApplicationWindow):
         self.all_packages:  list[Package] = []
         self.filtered:      list[Package] = []
         self.selected_pkg:  Optional[Package] = None
-        self.current_tab    = "info"
+        self.current_tab    = "changelog"
         self.current_filter = "all"
         self.current_sort   = SORT_OPTIONS[0]
         self._sync_ok       = True
@@ -2822,6 +3185,9 @@ class PakchanWindow(Adw.ApplicationWindow):
                         color:alpha(@foreground_color,0.45);padding:10px 12px 3px;}
         .active-filter {font-weight:bold;color:@accent_color;}
         .dep-tag       {font-size:10px;color:alpha(@foreground_color,0.4);}
+        .update-panel  {background:alpha(@foreground_color,0.03);
+                        border-top:1px solid alpha(@foreground_color,0.12);}
+        .update-log    {font-family:monospace;font-size:11px;padding:6px 10px;}
         """
         p.load_from_bytes(GLib.Bytes.new(css))
         Gtk.StyleContext.add_provider_for_display(
@@ -2831,6 +3197,7 @@ class PakchanWindow(Adw.ApplicationWindow):
 
     def _build_ui(self):
         self._css()
+        self.icon_theme = Gtk.IconTheme.get_for_display(Gdk.Display.get_default())
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.set_content(root)
 
@@ -2895,10 +3262,19 @@ class PakchanWindow(Adw.ApplicationWindow):
         pkg_panel = self._build_pkg_panel()
         pkg_panel.set_hexpand(True)
         left.append(pkg_panel)
+        # Reasonable floor for the sidebar+list side so the divider can't
+        # squeeze it down to almost nothing before shrink is disabled below.
+        left.set_size_request(400, -1)
         self.paned.set_start_child(left)
         self.paned.set_resize_start_child(True)
+        # By default Gtk.Paned allows shrinking either side all the way to
+        # 0 regardless of the child's requested minimum size — that's what
+        # let the divider hide a whole column when dragged to an edge.
+        # Disabling shrink makes each side's natural minimum a hard floor.
+        self.paned.set_shrink_start_child(False)
         self.paned.set_end_child(self._build_detail_panel())
         self.paned.set_resize_end_child(False)
+        self.paned.set_shrink_end_child(False)
         self.paned.set_position(780)
 
         self.stack = Gtk.Stack()
@@ -2907,6 +3283,14 @@ class PakchanWindow(Adw.ApplicationWindow):
         self.stack.add_named(self.paned,       "main")
         root.append(self.stack)
 
+        # Integrated update panel — slides up in place of opening an
+        # external terminal window. Hidden until an update is applied.
+        self.update_revealer = Gtk.Revealer()
+        self.update_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_UP)
+        self.update_revealer.set_reveal_child(False)
+        self.update_revealer.set_child(self._build_update_panel())
+        root.append(self.update_revealer)
+
         self.footer = Gtk.Label(label="Ready")
         self.footer.set_xalign(0)
         self.footer.add_css_class("dim-label")
@@ -2914,6 +3298,30 @@ class PakchanWindow(Adw.ApplicationWindow):
         self.footer.set_margin_top(3)
         self.footer.set_margin_bottom(5)
         root.append(self.footer)
+
+        # Global shortcuts: Ctrl+F focuses search (selecting existing text,
+        # matching browser-style "type to replace" behavior); Escape clears
+        # search if there's anything typed, otherwise returns focus to the
+        # package list. Attached to the window so it works regardless of
+        # which widget currently has focus.
+        key_controller = Gtk.EventControllerKey()
+        key_controller.connect("key-pressed", self._on_window_key)
+        self.add_controller(key_controller)
+
+    def _on_window_key(self, controller, keyval, keycode, state):
+        ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
+        if ctrl and keyval in (Gdk.KEY_f, Gdk.KEY_F):
+            self.search.grab_focus()
+            self.search.select_region(0, -1)
+            return True
+        if keyval == Gdk.KEY_Escape:
+            if self.search.get_text():
+                self.search.set_text("")
+                self._do_search()
+            else:
+                self.listbox.grab_focus()
+            return True
+        return False
 
     def _build_sidebar(self):
         sb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -3023,7 +3431,16 @@ class PakchanWindow(Adw.ApplicationWindow):
         kc.connect("key-pressed", self._on_list_key)
         self.listbox.add_controller(kc)
         sc.set_child(self.listbox)
-        box.append(sc)
+
+        self.empty_state = Adw.StatusPage()
+        self.empty_state.set_icon_name("system-search-symbolic")
+        self.empty_state.set_vexpand(True)
+
+        self.list_stack = Gtk.Stack()
+        self.list_stack.set_vexpand(True)
+        self.list_stack.add_named(sc, "list")
+        self.list_stack.add_named(self.empty_state, "empty")
+        box.append(self.list_stack)
 
         self.count_lbl = Gtk.Label(label="")
         self.count_lbl.add_css_class("dim-label")
@@ -3037,33 +3454,47 @@ class PakchanWindow(Adw.ApplicationWindow):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         box.set_size_request(360, -1)
 
+        header_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        header_row.set_margin_start(12); header_row.set_margin_end(12)
+        header_row.set_margin_top(10)
+
+        self.d_icon = Gtk.Image()
+        self.d_icon.set_pixel_size(48)
+        self.d_icon.set_from_icon_name("package-x-generic-symbolic")
+        header_row.append(self.d_icon)
+
+        name_col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        name_col.set_hexpand(True)
+
         self.d_name = Gtk.Label()
         self.d_name.set_markup("<b>Select a package</b>")
         self.d_name.set_xalign(0)
-        self.d_name.set_margin_start(12); self.d_name.set_margin_end(12)
-        self.d_name.set_margin_top(10);   self.d_name.set_margin_bottom(2)
+        self.d_name.set_margin_bottom(2)
         self.d_name.set_ellipsize(Pango.EllipsizeMode.END)
-        box.append(self.d_name)
+        name_col.append(self.d_name)
+        header_row.append(name_col)
+        box.append(header_row)
 
         self.d_desc = Gtk.Label(label="Click a package to view details.")
         self.d_desc.set_xalign(0)
         self.d_desc.set_margin_start(12); self.d_desc.set_margin_end(12)
         self.d_desc.set_margin_bottom(8)
         self.d_desc.add_css_class("dim-label")
-        self.d_desc.set_wrap(True); self.d_desc.set_max_width_chars(38)
+        self.d_desc.set_wrap(True); self.d_desc.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        self.d_desc.set_hexpand(True)
         box.append(self.d_desc)
         box.append(Gtk.Separator())
 
         self.tabs = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         self.tabs.set_homogeneous(True)
         self._tab_btns: dict[str, Gtk.ToggleButton] = {}
-        for key, label in [("info","Info"),("changelog","Changelog"),("files","Files")]:
+        for key, label in [("changelog","Changelog"),("info","Info"),("files","Files")]:
             btn = Gtk.ToggleButton(label=label)
             btn.add_css_class("flat")
             btn.connect("clicked", self._on_tab, key)
             self._tab_btns[key] = btn
             self.tabs.append(btn)
-        self._tab_btns["info"].set_active(True)
+        self._tab_btns["changelog"].set_active(True)
         box.append(self.tabs)
         box.append(Gtk.Separator())
 
@@ -3079,6 +3510,32 @@ class PakchanWindow(Adw.ApplicationWindow):
 
     # ── Package rows ──────────────────────────────────────────────────────────
 
+    _ICON_FALLBACK = {
+        "pacman":  "system-software-update-symbolic",
+        "aur":     "applications-development-symbolic",
+        "flatpak": "application-x-executable-symbolic",
+        "snap":    "package-x-generic-symbolic",
+    }
+
+    def _icon_widget_for(self, pkg: Package) -> Gtk.Image:
+        """
+        Real app icon (PAMAC-style) when one can be resolved from the
+        system icon theme, otherwise a generic per-source placeholder —
+        never a broken/blank image. Source of the icon name:
+          - pacman/AUR: the Icon= key read from the package's installed
+            .desktop file (see _desktop_entries_info).
+          - Flatpak: the app ID itself (Flatpak exports icons under it).
+          - Snap: the snap name, as a best-effort guess.
+        """
+        img = Gtk.Image()
+        img.set_pixel_size(32)
+        name = pkg.icon_name
+        if name and self.icon_theme.has_icon(name):
+            img.set_from_icon_name(name)
+        else:
+            img.set_from_icon_name(self._ICON_FALLBACK.get(pkg.repo, "package-x-generic-symbolic"))
+        return img
+
     def _make_row(self, pkg: Package) -> Gtk.ListBoxRow:
         row = Gtk.ListBoxRow(); row.pkg = pkg
         hb  = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -3091,6 +3548,8 @@ class PakchanWindow(Adw.ApplicationWindow):
         cb.set_visible(self.current_filter == "updates")
         cb.connect("toggled", self._on_pkg_check, pkg)
         hb.append(cb)
+
+        hb.append(self._icon_widget_for(pkg))
 
         nb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
         nb.set_hexpand(True)
@@ -3122,7 +3581,66 @@ class PakchanWindow(Adw.ApplicationWindow):
             hb.append(sl)
 
         row.set_child(hb)
+
+        right_click = Gtk.GestureClick(button=3)
+        right_click.connect("pressed",
+            lambda gesture, n_press, x, y: self._show_row_context_menu(pkg, row, x, y))
+        row.add_controller(right_click)
+
         return row
+
+    def _show_row_context_menu(self, pkg: Package, row: Gtk.ListBoxRow, x: float, y: float):
+        """Right-click menu: copy name, open homepage, force-refresh the
+        changelog — actions that otherwise require opening the detail
+        panel first."""
+        self.listbox.select_row(row)
+
+        popover = Gtk.Popover()
+        popover.set_parent(row)
+        rect = Gdk.Rectangle()
+        rect.x, rect.y, rect.width, rect.height = int(x), int(y), 1, 1
+        popover.set_pointing_to(rect)
+        popover.set_has_arrow(False)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        box.set_margin_start(4); box.set_margin_end(4)
+        box.set_margin_top(4);   box.set_margin_bottom(4)
+
+        def _add_item(label: str, callback, sensitive: bool = True):
+            btn = Gtk.Button(label=label)
+            btn.add_css_class("flat")
+            child = btn.get_child()
+            if child:
+                child.set_xalign(0)
+            btn.set_sensitive(sensitive)
+            def _on_click(_btn):
+                popover.popdown()
+                callback()
+            btn.connect("clicked", _on_click)
+            box.append(btn)
+
+        _add_item("Copy name", lambda: self._copy_text_to_clipboard(pkg.name))
+        _add_item("Open homepage", lambda: self._open_uri(pkg.url), sensitive=bool(pkg.url))
+        _add_item("Force-refresh changelog", lambda: self._context_force_refresh(pkg))
+
+        popover.set_child(box)
+        popover.popup()
+
+    def _copy_text_to_clipboard(self, text: str):
+        self.get_clipboard().set(text)
+        self.footer.set_text(f"Copied “{text}” to clipboard.")
+
+    def _open_uri(self, url: str):
+        if not url:
+            return
+        try:
+            Gio.AppInfo.launch_default_for_uri(url, None)
+        except Exception:
+            self.footer.set_text(f"Could not open {url}")
+
+    def _context_force_refresh(self, pkg: Package):
+        self._force_refresh_cl(pkg)
+        self.footer.set_text(f"Changelog cache cleared for {pkg.name}.")
 
     # ── Sort ──────────────────────────────────────────────────────────────────
 
@@ -3147,12 +3665,9 @@ class PakchanWindow(Adw.ApplicationWindow):
         elif s == "A → Z":        return sorted(pool, key=lambda p: p.name.lower())
         elif s == "Z → A":        return sorted(pool, key=lambda p: p.name.lower(), reverse=True)
         elif s == "Size ↓":
-            def _sz(p):
-                raw = p.installed_size
-                mul = {"GiB":1e9,"MiB":1e6,"KiB":1e3,"B":1}.get(raw.split()[-1] if raw else "",1)
-                try: return float(raw.split()[0]) * mul
-                except: return 0
-            return sorted(pool, key=_sz, reverse=True)
+            return sorted(pool, key=lambda p: p.size_bytes, reverse=True)
+        elif s == "Size ↑":
+            return sorted(pool, key=lambda p: (p.size_bytes == 0, p.size_bytes))
         elif s == "Updates first": return sorted(pool, key=lambda p: (not p.has_update, p.name.lower()))
         return pool
 
@@ -3182,6 +3697,17 @@ class PakchanWindow(Adw.ApplicationWindow):
         pool = self._sorted(pool)
         self.filtered = pool
 
+        if pool:
+            self.list_stack.set_visible_child_name("list")
+        else:
+            self.list_stack.set_visible_child_name("empty")
+            if q:
+                self.empty_state.set_title("No matching packages")
+                self.empty_state.set_description(f"Nothing matches “{q}”. Try a different search term.")
+            else:
+                self.empty_state.set_title("No packages here")
+                self.empty_state.set_description("Nothing in this category right now.")
+
         # Fix issue 1: progressive rendering in chunks so UI stays responsive
         CHUNK = 80
         gen   = self._pop_generation
@@ -3204,10 +3730,25 @@ class PakchanWindow(Adw.ApplicationWindow):
         self.upd_all_btn.set_visible(is_upd)
         self.upd_all_btn.set_sensitive(any(p.has_update for p in pool))
 
+        self._update_counts_label()
+        self._update_footer()
+
+        total = sum(1 for p in self.all_packages if p.checked)
+        self.apply_btn.set_sensitive(total > 0)
+        self.apply_btn.set_label(f"Apply ({total})")
+
+    def _update_counts_label(self):
+        """Rebuild the "N packages · N selected" label under the list.
+        Split out from _populate_list so a single checkbox toggle can
+        refresh the selected-count text without re-rendering all rows.
+        """
+        pool    = self.filtered
+        flt     = self.current_filter
+        q       = self.search.get_text().lower().strip()
         n       = len(pool)
         n_upd   = sum(1 for p in pool if p.has_update)
         checked = sum(1 for p in self.all_packages if p.checked)
-        parts   = [f"{n} package{'s' if n!=1 else ''}"]
+        parts   = [f"{n} package{'s' if n != 1 else ''}"]
         if flt != "updates" and n_upd:
             parts.append(f"{n_upd} with updates")
         if q:
@@ -3215,12 +3756,6 @@ class PakchanWindow(Adw.ApplicationWindow):
         if checked:
             parts.append(f"{checked} selected")
         self.count_lbl.set_text(" · ".join(parts))
-
-        self._update_footer()
-
-        total = sum(1 for p in self.all_packages if p.checked)
-        self.apply_btn.set_sensitive(total > 0)
-        self.apply_btn.set_label(f"Apply ({total})")
 
     def _update_footer(self):
         pkgs  = self.all_packages
@@ -3324,6 +3859,7 @@ class PakchanWindow(Adw.ApplicationWindow):
         total = sum(1 for p in self.all_packages if p.checked)
         self.apply_btn.set_sensitive(total > 0)
         self.apply_btn.set_label(f"Apply ({total})")
+        self._update_counts_label()
         self._update_footer()
 
     def _on_row_selected(self, lb, row):
@@ -3332,6 +3868,10 @@ class PakchanWindow(Adw.ApplicationWindow):
         self.selected_pkg = pkg
         self.d_name.set_markup(f"<b>{GLib.markup_escape_text(pkg.name)}</b>")
         self.d_desc.set_text(pkg.description or "Loading…")
+        if pkg.icon_name and self.icon_theme.has_icon(pkg.icon_name):
+            self.d_icon.set_from_icon_name(pkg.icon_name)
+        else:
+            self.d_icon.set_from_icon_name(self._ICON_FALLBACK.get(pkg.repo, "package-x-generic-symbolic"))
         if pkg.repo in ("flatpak", "snap") and (not pkg.description or not pkg.url):
             threading.Thread(target=self._enrich_bg, args=(pkg,), daemon=True).start()
         self._render_detail()
@@ -3403,7 +3943,8 @@ class PakchanWindow(Adw.ApplicationWindow):
         else:
             v = Gtk.Label(label=value or "—")
             v.set_xalign(0); v.set_wrap(True)
-            v.set_max_width_chars(32); v.set_selectable(True)
+            v.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            v.set_hexpand(True); v.set_selectable(True)
             hb.append(v)
         self.d_box.append(hb)
 
@@ -3435,7 +3976,7 @@ class PakchanWindow(Adw.ApplicationWindow):
             err = Gtk.Label(label=pkg.changelog["error"])
             err.add_css_class("error"); err.set_wrap(True); self.d_box.append(err)
             rb = Gtk.Button(label="Retry"); rb.set_halign(Gtk.Align.CENTER)
-            rb.connect("clicked", lambda _: self._retry_cl(pkg))
+            rb.connect("clicked", lambda _: self._force_refresh_cl(pkg))
             self.d_box.append(rb)
             self._append_debug_expander(pkg)
             return
@@ -3445,38 +3986,99 @@ class PakchanWindow(Adw.ApplicationWindow):
         # this is the simple, always-correct fallback requested by the user.
         if pkg.changelog.get("_link_only"):
             url = pkg.changelog.get("_link_url", "")
-            link_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-            prefix = Gtk.Label(label="See")
-            prefix.set_xalign(0)
-            link_row.append(prefix)
-            link_btn = Gtk.LinkButton(uri=url)
-            link_btn.set_label(url)
-            inner = link_btn.get_child()
-            if inner:
-                inner.set_ellipsize(Pango.EllipsizeMode.END)
-                inner.set_max_width_chars(34)
-            link_row.append(link_btn)
-            suffix = Gtk.Label(label="for details.")
-            suffix.set_xalign(0)
-            link_row.append(suffix)
-            link_row.set_margin_bottom(4)
-            self.d_box.append(link_row)
+            escaped_url = GLib.markup_escape_text(url)
+            link_lbl = Gtk.Label()
+            link_lbl.set_markup(f'See <a href="{escaped_url}">{escaped_url}</a> for details.')
+            link_lbl.set_xalign(0)
+            link_lbl.set_wrap(True); link_lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            link_lbl.set_hexpand(True)
+            link_lbl.set_margin_bottom(4)
+            self.d_box.append(link_lbl)
+
+            ref_btn = Gtk.Button(label="↻ Refresh")
+            ref_btn.add_css_class("flat"); ref_btn.set_halign(Gtk.Align.START)
+            ref_btn.connect("clicked", lambda _: self._force_refresh_cl(pkg))
+            self.d_box.append(ref_btn)
+
             self._append_debug_expander(pkg)
             return
 
-        # Source label + cache indicator
-        src_text = f"Source: {pkg.changelog.get('source', '')}"
+        # Source label + cache indicator — only the URL portion is
+        # clickable (via an inline markup link), not the whole line.
+        src_desc = pkg.changelog.get('source', '')
         if pkg.changelog.get("_from_cache"):
-            src_text += "  [cached]"
-        src = Gtk.Label(label=src_text)
-        src.add_css_class("dim-label"); src.set_xalign(0); src.set_margin_bottom(2)
+            src_desc += "  [cached]"
+        src_url = _resolve_source_url(pkg.changelog)
+        src = Gtk.Label()
+        src.set_xalign(0)
+        src.set_wrap(True); src.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        src.set_hexpand(True)
+        if src_url:
+            desc_text = src_desc
+            if src_url in desc_text:
+                desc_text = desc_text.replace(src_url, "").rstrip(" —-")
+            else:
+                # Source text may only contain the repo path (e.g.
+                # "owner/repo"), not the full reconstructed URL — strip
+                # that instead so it isn't shown twice.
+                path_part = re.sub(r'^https?://[^/]+/?', '', src_url)
+                if path_part and path_part in desc_text:
+                    desc_text = desc_text.replace(path_part, "").rstrip(" —-")
+            escaped_desc = GLib.markup_escape_text(f"Source: {desc_text}".rstrip())
+            escaped_url  = GLib.markup_escape_text(src_url)
+            src.set_markup(f'{escaped_desc}  <a href="{escaped_url}">{escaped_url}</a>')
+        else:
+            src.set_text(f"Source: {src_desc}")
+        src.add_css_class("dim-label"); src.set_margin_bottom(2)
         self.d_box.append(src)
+
+        # When automatic changelog detection genuinely found nothing, the
+        # Source line above stays "unavailable" (so it's unambiguous that
+        # detection failed) — this adds a clickable link to the package's
+        # own homepage underneath it, so the user has a manual next step
+        # instead of a dead end.
+        manual_url = pkg.changelog.get("_manual_check_url")
+        if manual_url:
+            escaped_url = GLib.markup_escape_text(manual_url)
+            manual_lbl = Gtk.Label()
+            manual_lbl.set_markup(
+                f'You can check manually: <a href="{escaped_url}">{escaped_url}</a>')
+            manual_lbl.set_xalign(0)
+            manual_lbl.set_wrap(True); manual_lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            manual_lbl.set_hexpand(True)
+            manual_lbl.add_css_class("dim-label"); manual_lbl.set_margin_bottom(2)
+            self.d_box.append(manual_lbl)
 
         # Fix #6: stale warning
         if pkg.changelog.get("_stale"):
             stale_lbl = Gtk.Label(label="⚠ Cached data may be outdated (>7 days)")
             stale_lbl.add_css_class("stale-warn"); stale_lbl.set_xalign(0)
             self.d_box.append(stale_lbl)
+
+        # Newest version found didn't match the installed/pending version
+        # (see _target_version_satisfied) — shown rather than hidden, since
+        # a wrong-but-labelled changelog is more useful than a silently
+        # misleading one.
+        if pkg.changelog.get("_version_mismatch"):
+            mismatch_lbl = Gtk.Label(
+                label="⚠ This may not be the changelog for the current version")
+            mismatch_lbl.add_css_class("stale-warn"); mismatch_lbl.set_xalign(0)
+            self.d_box.append(mismatch_lbl)
+
+        # Softer than _version_mismatch: the newest entry looked at
+        # least as new as the installed/pending version, but that exact
+        # version isn't literally listed — often fine (a rolling-release
+        # testing build ahead of what's installed, a changelog that
+        # skips versions), but worth a quiet note rather than implying
+        # an exact match was confirmed.
+        elif pkg.changelog.get("_version_unconfirmed"):
+            unconfirmed_lbl = Gtk.Label(
+                label="ℹ Exact update version not listed below — "
+                      "check the source link above for details")
+            unconfirmed_lbl.add_css_class("dim-label"); unconfirmed_lbl.set_xalign(0)
+            unconfirmed_lbl.set_wrap(True); unconfirmed_lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            unconfirmed_lbl.set_hexpand(True)
+            self.d_box.append(unconfirmed_lbl)
 
         ref_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         ref_btn = Gtk.Button(label="↻ Refresh")
@@ -3505,7 +4107,8 @@ class PakchanWindow(Adw.ApplicationWindow):
                 rb2.append(bul)
                 cl = Gtk.Label(label=change)
                 cl.set_xalign(0); cl.set_wrap(True)
-                cl.set_max_width_chars(38); cl.set_selectable(True)
+                cl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+                cl.set_hexpand(True); cl.set_selectable(True)
                 rb2.append(cl)
                 self.d_box.append(rb2)
             self.d_box.append(Gtk.Separator())
@@ -3548,11 +4151,6 @@ class PakchanWindow(Adw.ApplicationWindow):
         clipboard.set(str("\n".join(trace)))
         self.footer.set_text("Debug trace copied to clipboard.")
 
-    def _retry_cl(self, pkg: Package):
-        pkg.changelog = None
-        if self.selected_pkg and self.selected_pkg.name == pkg.name:
-            self._render_detail()
-
     def _force_refresh_cl(self, pkg: Package):
         key = pkg.cl_key
         if key in _CL_DB:
@@ -3563,17 +4161,20 @@ class PakchanWindow(Adw.ApplicationWindow):
             self._render_detail()
 
     def _render_files(self, pkg: Package):
-        """Fix #20: walk real Flatpak deploy directory."""
+        """Fix #20: walk real Flatpak deploy directory.
+        Fix: pacman file listing now runs on a background thread —
+        `pacman -Ql` can be slow for large packages and was previously
+        run synchronously on the GTK main thread, freezing the UI.
+        """
         if pkg.repo == "pacman":
-            out, _, rc = run(["pacman", "-Ql", pkg.name])
-            if rc == 0:
-                for line in out.splitlines()[:80]:
-                    parts = line.split(None, 1)
-                    path  = parts[1] if len(parts) > 1 else line
-                    l = Gtk.Label(label=path)
-                    l.add_css_class("mono"); l.set_xalign(0); l.set_selectable(True)
-                    self.d_box.append(l)
-                return
+            sp = Gtk.Spinner(); sp.start()
+            sp.set_size_request(24, 24); sp.set_halign(Gtk.Align.CENTER)
+            self.d_box.append(sp)
+            lbl = Gtk.Label(label="Reading file list…")
+            lbl.add_css_class("dim-label"); lbl.set_halign(Gtk.Align.CENTER)
+            self.d_box.append(lbl)
+            threading.Thread(target=self._bg_files, args=(pkg,), daemon=True).start()
+            return
 
         if pkg.repo == "flatpak":
             found_files = False
@@ -3612,6 +4213,30 @@ class PakchanWindow(Adw.ApplicationWindow):
         note = Gtk.Label(label="File list not available.")
         note.add_css_class("dim-label"); note.set_wrap(True)
         self.d_box.append(note)
+
+    def _bg_files(self, pkg: Package):
+        out, _, rc = run(["pacman", "-Ql", pkg.name])
+        lines = []
+        if rc == 0:
+            for line in out.splitlines()[:80]:
+                parts = line.split(None, 1)
+                lines.append(parts[1] if len(parts) > 1 else line)
+        GLib.idle_add(self._files_done, pkg, lines)
+
+    def _files_done(self, pkg: Package, lines: list):
+        if (self.selected_pkg and self.selected_pkg.name == pkg.name
+                and self.current_tab == "files"):
+            self._clear()
+            if lines:
+                for path in lines:
+                    l = Gtk.Label(label=path)
+                    l.add_css_class("mono"); l.set_xalign(0); l.set_selectable(True)
+                    self.d_box.append(l)
+            else:
+                note = Gtk.Label(label="File list not available.")
+                note.add_css_class("dim-label"); note.set_wrap(True)
+                self.d_box.append(note)
+        return False
 
     def _bg_cl(self, pkg: Package):
         pkg.changelog = fetch_changelog(pkg)
@@ -3662,67 +4287,296 @@ class PakchanWindow(Adw.ApplicationWindow):
 
     # ── Apply updates ─────────────────────────────────────────────────────────
 
+    # ── Integrated update panel ──────────────────────────────────────────────
+    # Replaces the old "spawn an external terminal window" approach. The
+    # update runs in a real pty (via Vte if available, otherwise a plain
+    # pty-backed fallback) inside a panel that slides up at the bottom of
+    # the window, so `sudo`/makepkg prompts still work exactly as before,
+    # but the whole thing stays inside Pakchan. When the process finishes,
+    # we simply reload the package list from disk — that's the reliable
+    # way to know what's actually installed now (rather than trying to
+    # infer it from parsed terminal output), and it also clears the
+    # checkbox/"has update" state for whatever just got updated.
+
+    def _build_update_panel(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box.add_css_class("update-panel")
+
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        header.set_margin_start(10); header.set_margin_end(10)
+        header.set_margin_top(6);    header.set_margin_bottom(6)
+        self.update_spinner = Gtk.Spinner()
+        header.append(self.update_spinner)
+        self.update_status_lbl = Gtk.Label(label="Updating…")
+        self.update_status_lbl.set_xalign(0)
+        self.update_status_lbl.set_hexpand(True)
+        self.update_status_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+        header.append(self.update_status_lbl)
+        # Collapsed by default: this row alone acts as the status bar.
+        # Clicking it reveals the full log below without changing anything
+        # about the header itself.
+        self.update_expand_btn = Gtk.Button(icon_name="pan-down-symbolic")
+        self.update_expand_btn.add_css_class("flat")
+        self.update_expand_btn.set_tooltip_text("Show details")
+        self.update_expand_btn.connect("clicked", self._on_toggle_update_log)
+        header.append(self.update_expand_btn)
+        self.update_close_btn = Gtk.Button(icon_name="window-close-symbolic")
+        self.update_close_btn.add_css_class("flat")
+        self.update_close_btn.set_tooltip_text("Hide panel")
+        self.update_close_btn.connect(
+            "clicked", lambda _: self.update_revealer.set_reveal_child(False))
+        header.append(self.update_close_btn)
+        box.append(header)
+
+        self.update_log_revealer = Gtk.Revealer()
+        self.update_log_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_UP)
+        self.update_log_revealer.set_reveal_child(False)
+        log_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        log_box.append(Gtk.Separator())
+
+        if _HAVE_VTE:
+            self.vte_term = Vte.Terminal()
+            self.vte_term.set_size_request(-1, 220)
+            self.vte_term.set_hexpand(True)
+            self.vte_term.connect("child-exited", self._on_update_child_exited)
+            sc = Gtk.ScrolledWindow()
+            sc.set_child(self.vte_term)
+            log_box.append(sc)
+        else:
+            # Fallback: no Vte on this system. Still a real pty underneath
+            # (so pkexec/sudo detect a tty correctly) — just rendered as a
+            # plain scrolling log instead of a proper terminal. No input
+            # box: with --noconfirm everywhere and pkexec handling the
+            # password via its own dialog, there's nothing left to type
+            # back into the update itself.
+            self.update_textview = Gtk.TextView()
+            self.update_textview.set_editable(False)
+            self.update_textview.set_cursor_visible(False)
+            self.update_textview.set_wrap_mode(Gtk.WrapMode.CHAR)
+            self.update_textview.add_css_class("update-log")
+            sc = Gtk.ScrolledWindow()
+            sc.set_child(self.update_textview)
+            sc.set_size_request(-1, 220)
+            log_box.append(sc)
+
+        self.update_log_revealer.set_child(log_box)
+        box.append(self.update_log_revealer)
+        return box
+
+    def _on_toggle_update_log(self, btn):
+        expanded = self.update_log_revealer.get_reveal_child()
+        self.update_log_revealer.set_reveal_child(not expanded)
+        btn.set_icon_name("pan-up-symbolic" if not expanded else "pan-down-symbolic")
+        btn.set_tooltip_text("Hide details" if not expanded else "Show details")
+
     def _apply_updates(self, btn):
         sel = [p for p in self.all_packages if p.checked]
         if not sel: return
-        dlg = Gtk.Dialog()
-        dlg.set_transient_for(self)
-        dlg.set_title("Apply updates?")
-        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        content.set_margin_top(12)
-        content.set_margin_bottom(12)
-        content.set_margin_start(12)
-        content.set_margin_end(12)
-        lbl = Gtk.Label(label=f"Update {len(sel)} package(s). A terminal will open.")
-        lbl.set_wrap(True)
-        content.append(lbl)
+        dlg = Adw.AlertDialog(
+            heading="Apply updates?",
+            body=f"Update {len(sel)} package(s). You'll be asked for your "
+                 f"password in the usual system prompt.",
+        )
+        dlg.add_response("cancel", "Cancel")
+        dlg.add_response("apply", "Apply")
+        dlg.set_response_appearance("apply", Adw.ResponseAppearance.SUGGESTED)
+        dlg.set_default_response("apply")
+        dlg.set_close_response("cancel")
+        dlg.connect("response", self._on_apply_dialog_response, sel)
+        dlg.present(self)
 
-        button_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        button_row.set_margin_top(12)
-        button_row.set_halign(Gtk.Align.END)
-        cancel_btn = Gtk.Button(label="Cancel")
-        cancel_btn.add_css_class("secondary")
-        cancel_btn.connect("clicked", lambda _btn: dlg.destroy())
-        apply_btn = Gtk.Button(label="Apply")
-        apply_btn.add_css_class("suggested-action")
-        apply_btn.connect("clicked", lambda _btn: self._do_apply(dlg, Gtk.ResponseType.APPLY, sel))
-        button_row.append(cancel_btn)
-        button_row.append(apply_btn)
-        content.append(button_row)
+    def _on_apply_dialog_response(self, dlg, response, sel: list):
+        if response == "apply":
+            self._do_apply(sel)
 
-        dlg.set_child(content)
-        dlg.present()
+    def _make_sudo_shim(self) -> Optional[str]:
+        """Write a tiny `sudo` shim that redirects to `pkexec`, in its own
+        temp dir. When that dir is prepended to PATH, any command the
+        update script runs — including an AUR helper's own internal
+        `sudo` call for the final `pacman -U` step — asks for the
+        password via the normal graphical polkit prompt (a separate
+        system dialog) instead of pakchan trying to read it from inside
+        its own log panel, which was confusing and didn't actually work.
+        """
+        if not cmd_exists("pkexec"):
+            return None
+        try:
+            d = tempfile.mkdtemp(prefix="pakchan-sudo-")
+            shim = Path(d) / "sudo"
+            shim.write_text("#!/bin/sh\nexec pkexec \"$@\"\n")
+            shim.chmod(0o755)
+            return d
+        except Exception:
+            return None
 
-    def _do_apply(self, dlg, response, sel: list):
-        if response != Gtk.ResponseType.APPLY:
-            dlg.destroy()
-            return
-        dlg.destroy()
+    def _do_apply(self, sel: list):
         # Fix #7: shlex.quote all package names — prevents shell injection
         pac = [shlex.quote(p.name) for p in sel if p.repo == "pacman"]
         aur = [shlex.quote(p.name) for p in sel if p.repo == "aur"]
         flt = [shlex.quote(p.name) for p in sel if p.repo == "flatpak"]
         snp = [shlex.quote(p.name) for p in sel if p.repo == "snap"]
+
+        # Use pkexec instead of sudo for our own root commands: it pops
+        # the standard graphical password dialog (the polkit agent) as
+        # its own window, rather than needing a tty-attached prompt we'd
+        # have to surface somewhere in our UI.
+        have_pkexec = cmd_exists("pkexec")
+        root_cmd = "pkexec" if have_pkexec else "sudo"
+
         cmds = []
-        if pac: cmds.append(f"sudo pacman -S --noconfirm {' '.join(pac)}")
+        if pac: cmds.append(f"{root_cmd} pacman -S --noconfirm {' '.join(pac)}")
         if aur:
             h = "yay" if cmd_exists("yay") else "paru"
             cmds.append(f"{h} -S --noconfirm {' '.join(aur)}")
         if flt: cmds.append(f"flatpak update -y {' '.join(flt)}")
-        if snp: cmds.append(f"sudo snap refresh {' '.join(snp)}")
-        full = " && ".join(cmds)
-        for term in ["kgx", "gnome-terminal", "konsole", "xterm", "alacritty"]:
-            if not cmd_exists(term):
-                continue
-            runner = f'{full}; echo; echo Done. Press Enter to close.; read -r; exit'
-            if term == "gnome-terminal":
-                os.system(f'{term} -- bash -lc "{runner}" &')
-            elif term in {"konsole", "xterm", "alacritty"}:
-                os.system(f'{term} -e bash -lc "{runner}" &')
-            else:
-                os.system(f'{term} -- bash -lc "{runner}" &')
+        if snp: cmds.append(f"{root_cmd} snap refresh {' '.join(snp)}")
+        if not cmds:
             return
-        self.footer.set_text(f"Run manually: {full}")
+        full = " && ".join(cmds)
+
+        # If an AUR helper is involved, it'll call plain `sudo` itself
+        # for the final install step — route that through the same
+        # pkexec shim so it also uses the graphical prompt.
+        self._sudo_shim_dir = self._make_sudo_shim() if (aur and have_pkexec) else None
+        path_prefix = (f'export PATH="{self._sudo_shim_dir}:$PATH"; '
+                        if self._sudo_shim_dir else "")
+        runner = (f'printf "\\033[1m$ {full}\\033[0m\\n"; '
+                  f'{path_prefix}{full}; echo; echo "[pakchan] Done."')
+
+        self.apply_btn.set_sensitive(False)
+        self.update_spinner.start()
+        self.update_close_btn.set_sensitive(False)
+        self.update_status_lbl.set_text(f"Updating {len(sel)} package(s)…")
+        self.footer.set_text(f"Updating {len(sel)} package(s)…")
+        self.update_revealer.set_reveal_child(True)
+        # Deliberately not touching update_log_revealer here — whether the
+        # log is expanded or collapsed carries over from however the user
+        # last left it this session (only resets to collapsed if the app
+        # itself is restarted, since the panel is rebuilt fresh then).
+
+        if _HAVE_VTE:
+            self.vte_term.reset(True, True)
+            self.vte_term.spawn_async(
+                Vte.PtyFlags.DEFAULT,
+                str(Path.home()),
+                ["/bin/bash", "-lc", runner],
+                None,   # inherit the current environment
+                GLib.SpawnFlags.DEFAULT,
+                None, None,
+                -1,
+                None,
+                self._on_vte_spawned,
+            )
+        else:
+            self._run_update_pty_fallback(runner)
+
+    def _on_vte_spawned(self, terminal, pid, error):
+        if error:
+            self.update_status_lbl.set_text(f"Failed to start update: {error}")
+            self.update_spinner.stop()
+            self.update_close_btn.set_sensitive(True)
+            self.apply_btn.set_sensitive(True)
+            return
+        # The terminal widget itself only shows anything once the log is
+        # expanded, so poll its buffer for the last line and mirror it
+        # onto the always-visible status row/footer (pamac-style), the
+        # same way the pty-fallback path already does per output chunk.
+        self._vte_poll_id = GLib.timeout_add(400, self._poll_vte_status)
+
+    def _poll_vte_status(self):
+        try:
+            text = self.vte_term.get_text()[0]
+        except Exception:
+            self._vte_poll_id = None
+            return False
+        last = next((ln.strip() for ln in reversed(text.split("\n")) if ln.strip()), None)
+        if last and "assword" not in last:
+            snippet = last[:100]
+            self.update_status_lbl.set_text(snippet)
+            self.footer.set_text(snippet)
+        return True
+
+    def _on_update_child_exited(self, terminal, status):
+        poll_id = getattr(self, "_vte_poll_id", None)
+        if poll_id:
+            GLib.source_remove(poll_id)
+            self._vte_poll_id = None
+        self._update_finished(status)
+
+    # ── Fallback path when Vte isn't installed ───────────────────────────────
+
+    def _run_update_pty_fallback(self, runner: str):
+        buf = self.update_textview.get_buffer()
+        buf.set_text("")
+        # No pty here on purpose: pkexec authenticates via its own GUI
+        # dialog (not by checking isatty on our stdin), so we don't need
+        # one for that anymore. Without a pty, pacman/AUR helpers detect
+        # non-interactive output and print plain, complete lines instead
+        # of \r-redrawn progress bars — which sidesteps an entire class
+        # of terminal-emulation bugs (cursor tricks, partial redraws)
+        # rather than trying to hand-parse them.
+        try:
+            proc = subprocess.Popen(
+                ["/bin/bash", "-lc", runner],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1,
+            )
+        except Exception as e:
+            self.update_status_lbl.set_text(f"Failed to start update: {e}")
+            self.update_spinner.stop()
+            self.update_close_btn.set_sensitive(True)
+            self.apply_btn.set_sensitive(True)
+            return
+        threading.Thread(target=self._read_update_output,
+                          args=(proc,), daemon=True).start()
+
+    def _read_update_output(self, proc):
+        for line in proc.stdout:
+            GLib.idle_add(self._append_update_output, line)
+        proc.stdout.close()
+        status = proc.wait()
+        GLib.idle_add(self._update_finished, status)
+
+    def _append_update_output(self, line: str):
+        # Belt-and-braces: strip any ANSI codes a tool might still emit
+        # even without a pty (a few don't check isatty before coloring).
+        line = _ANSI_ESCAPE_RE.sub("", line).rstrip("\n")
+        if line.strip():
+            tb = self.update_textview.get_buffer()
+            tb.insert(tb.get_end_iter(), line + "\n")
+            self.update_textview.scroll_mark_onscreen(tb.get_insert())
+
+            # Surface the current line as the visible status — this is
+            # what shows in the collapsed panel row, so it needs to
+            # actually say what's happening. Password prompts are
+            # skipped: pkexec/the sudo shim handles those via a separate
+            # system dialog now.
+            if "assword" not in line:
+                snippet = line.strip()[:100]
+                self.update_status_lbl.set_text(snippet)
+                self.footer.set_text(snippet)
+        return False
+
+    def _update_finished(self, status: int):
+        self.update_spinner.stop()
+        self.update_close_btn.set_sensitive(True)
+        self.apply_btn.set_sensitive(True)
+        shim_dir = getattr(self, "_sudo_shim_dir", None)
+        if shim_dir:
+            shutil.rmtree(shim_dir, ignore_errors=True)
+            self._sudo_shim_dir = None
+        ok = (status == 0)
+        msg = ("Update finished — refreshing package list…" if ok else
+               f"Update process exited with an error (code {status}) — "
+               f"refreshing package list anyway…")
+        self.update_status_lbl.set_text(msg)
+        self.footer.set_text(msg)
+        # This is the fix for stale "still selected / still shows as
+        # updatable" packages: rather than trying to patch each Package's
+        # state from parsed terminal output, just re-read the real state
+        # from pacman/AUR/flatpak/snap, the same way startup does.
+        self._load_packages()
+        return False
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
@@ -3740,4 +4594,3 @@ if __name__ == "__main__":
     atexit.register(_on_exit)     # Fix #2: always flush on exit
     app = PakchanApp()
     sys.exit(app.run(sys.argv))
-  
