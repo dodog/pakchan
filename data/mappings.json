@@ -395,6 +395,10 @@
       "host": "gitlab.com",
       "repo": "wireshark/wireshark"
     },
+    "buildbox": {
+      "host": "gitlab.com",
+      "repo": "BuildGrid/buildbox/buildbox"
+    },    
     "xdg-desktop-portal-kde": {
       "host": "invent.kde.org",
       "repo": "plasma/xdg-desktop-portal-kde"
@@ -405,7 +409,7 @@
     "chromium": "https://chromereleases.googleblog.com/search/label/Stable%20updates",
     "code": "https://code.visualstudio.com/updates",
     "docker-desktop": "https://docs.docker.com/desktop/release-notes/",
-    "filezilla": "https://filezilla-project.org/versions.php",
+    "filezilla": "https://filezilla-project.org/newsfeed.php",
     "firefox": "https://www.firefox.com/en-US/releases",
     "firefox-esr": "https://www.firefox.com/en-US/releases",
     "grsync": "https://www.opbyte.it/grsync/changes.html",
