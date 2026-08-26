@@ -18,6 +18,10 @@
       "parser": "text_file",
       "url": "https://codeberg.org/mbunkus/mkvtoolnix/raw/branch/main/NEWS.md"
     },
+    "filezilla": {
+      "parser": "filezilla",
+      "url": "https://filezilla-project.org/newsfeed.php"
+    },    
     "xnviewmp": {
       "parser": "mantisbt",
       "url": "https://www.xnview.com/mantisbt/changelog_page.php"
