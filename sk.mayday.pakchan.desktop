@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Pakchan
+GenericName=Package Manager
+Comment=Package manager with real changelogs for Pacman, AUR, Flatpak, and Snap
+Exec=pakchan
+Icon=sk.mayday.pakchan
+Terminal=false
+Categories=System;PackageManager;
+Keywords=packages;update;changelog;pacman;aur;flatpak;snap;
+StartupNotify=true
