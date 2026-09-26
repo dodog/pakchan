@@ -22,6 +22,9 @@ You hit update and your package manager **tells you... nothing**. Just a version
 
 Pakchan goes and finds out. It digs up the real release notes — from GitHub, GitLab, the project's own website, Flathub, AUR,  wherever they actually live — and puts them right in front of you before you update anything. 
 
+
+<img width="1482" height="953" alt="pakchan-screenshot" src="/web/img/pakchan-screenshot.png" />
+
 ## 🚀 What you get
 
 
