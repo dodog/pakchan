@@ -4382,7 +4382,7 @@ class PakchanWindow(Adw.ApplicationWindow):
             "with real changelogs for Pacman, AUR, Flatpak, and Snap.")
         dlg.set_website("https://dodog.github.io/pakchan/web/")
         dlg.set_issue_url("https://github.com/dodog/pakchan/issues")
-        dlg.set_license_type(Gtk.License.GPL_3_0)
+        dlg.set_license_type(Gtk.License.MIT_X11)
         dlg.set_developers([
             "Jozef Gaal",
             "Pakchan contributors https://github.com/dodog/pakchan/graphs/contributors",
