@@ -82,7 +82,7 @@ DESK
 
 ## ⚙️ How changelogs work
 
-Pakchan resolves changelogs using a layered, source-aware process rather than relying on a single package metadata field. Plus Pakchan stores changelog source mappings in `data/mappings.json`, which is consumed by the app to resolve the correct source for each package.
+Pakchan resolves changelogs using a layered, source-aware process rather than relying on a single package metadata field. Pakchan stores changelog source mappings in `data/mappings.json`, which is fetched from GitHub in the background, cached locally, and consumed by the app to resolve the correct source for each package. `data/mappings.json` has four top-level sections: `github`, `gitlab`, `release_pages`, and `custom`.
 
 ### Add a package mapping
 
@@ -91,28 +91,28 @@ Pakchan resolves changelogs using a layered, source-aware process rather than re
 
 ### General strategy
 
-1. Check `data/mappings.json` first for a custom source mapping.
-2. Use local AppStream metadata for desktop apps when available.
-3. Resolve known GitHub/GitLab repos from mappings or package URLs.
-4. Scan the package homepage for upstream repo links.
-5. Fall back to packaging or commit history only when upstream changelog sources are unavailable.
+Every source type checks these first, in order:
+
+1. Check `data/mappings.json` for a known mapping — a `github` or `gitlab` repo, a `custom` parser entry, or a `release_pages` URL.
+2. Use local AppStream metadata (`/usr/share/metainfo`, `/usr/share/appdata`) for desktop apps, when available.
+3. Resolve GitHub/GitLab repos directly from the package's own URL (pacman/AUR), or scan the package homepage for an upstream repo link.
+4. Beyond that, each package source has its own last-resort fallback — see below. Pacman-repo packages simply report the changelog as unavailable; AUR, Flatpak, and Snap each have their own further fallback.
 
 ### Pacman packages
 
 - Starts with `data/mappings.json` and local AppStream metadata.
-- Reads package metadata from `pacman -Si` to get the upstream homepage.
-- Uses known GitHub/GitLab repo mappings and direct GitHub/GitLab URLs.
-- Scrapes the homepage to find the upstream repository if needed.
-- As a last resort, fetches Arch Linux packaging repo tags/commits from `gitlab.archlinux.org`.
+- Reads package metadata from `pacman -Si` to get the upstream homepage, if not already known.
+- Looks for a direct GitHub/GitLab URL in the package's homepage, then scrapes the homepage itself for an upstream repo link if needed.
+- If nothing upstream can be resolved, Pakchan reports the changelog as unavailable, with a link to the package's homepage if one is known — there is no packaging-history fallback for regular repo packages.
 
-This means Pakchan prefers real upstream release notes, and only uses Arch packaging history when no better source is found.
+This means Pakchan prefers real upstream release notes, and simply says "not found" (with a homepage link when possible) rather than guessing at a substitute source.
 
 ### AUR packages
 
 - Starts with `data/mappings.json` and local AppStream metadata.
-- Fetches the package homepage URL from the AUR RPC API.
-- Tries known GitHub/GitLab mappings, direct repo links, and homepage-based repo discovery.
-- If no upstream changelog can be resolved, falls back to the AUR cgit PKGBUILD commit log.
+- Fetches the package homepage URL from the AUR RPC API, if not already known.
+- Tries a direct GitHub/GitLab URL, then homepage-based repo discovery.
+- If no upstream changelog can be resolved, falls back to the AUR package's own cgit commit log (`aur.archlinux.org/cgit`) — the PKGBUILD's git history.
 
 AUR fallback data is treated as packaging commit history, not the upstream project's official changelog.
 
@@ -120,27 +120,27 @@ AUR fallback data is treated as packaging commit history, not the upstream proje
 
 - Starts with `data/mappings.json`.
 - Queries the Flathub REST API for release metadata and notes.
-- If the API has no release notes, it parses Flathub AppStream XML from the CDN.
-- If Flathub still does not provide usable notes, it tries the package homepage for upstream GitHub/GitLab release data.
+- If the API has no release notes, it parses the Flathub AppStream XML from the CDN.
+- If Flathub still doesn't provide usable notes, it tries the app's homepage URL for upstream GitHub/GitLab release data.
 
 ### Snap packages
 
 - Starts with `data/mappings.json`.
-- Queries the Snap Store API for release/version metadata.
-- If the Snap Store data is insufficient, it tries the package homepage for upstream release notes.
+- Queries the Snap Store API for version/channel metadata (the Snap Store itself has no changelog field).
+- For the actual changelog, it tries a list of candidate URLs in order — the snap's source-code link, issues link, and website link from the Store API, then `snap info`'s own website line — checking each for upstream GitHub/GitLab release data until one works.
+- If none of them yield a changelog, Pakchan reports that the Snap Store doesn't provide release notes, with a link to the best candidate page it found.
 
 ### Custom parsers
 
-For packages with edge-case sources, Pakchan can use custom parser types like:
+For packages with edge-case sources, a `custom` entry in `data/mappings.json` can select one of these parser types:
 
-- `mozilla` for Mozilla-style release pages
-- `mantisbt` for MantisBT changelog pages
-- `filezilla` for FileZilla news feeds
-- `text_file` for plain text changelog files
-- `github_raw` for raw GitHub changelog files like `CHANGELOG.md`
+- `mozilla` — Mozilla's product-details JSON API, used for Firefox/Thunderbird
+- `filezilla` — FileZilla's `changelog.php` release page
+- `text_file` — a plain text changelog file (also auto-detects Markdown-style headings and switches to the Markdown parser)
+- `github_raw` — a raw changelog file served straight from GitHub, e.g. `CHANGELOG.md`
+- `gitlab` — force GitLab-style release resolution for a given `host`/`repo`, bypassing the top-level `gitlab` mapping section
 
-These custom entries are defined in `data/mappings.json` and let Pakchan interpret release notes that standard parsing would miss.
-                                                                                                                                                  
+These custom entries let Pakchan interpret release notes that standard parsing would miss. Separately, a `release_pages` mapping simply points at a page to scrape with Pakchan's generic, best-effort release-notes scraper — useful for sites that don't fit any of the parser types above.
 
 ## Troubleshooting
 
