@@ -1,8 +1,3 @@
-# Exclude from GitHub's auto-generated release archives (git archive).
-# These stay in the repo and on GitHub Pages — they're just left out
-# of the tarball that release tags produce, since the app doesn't need
-# them at runtime (mappings.json is fetched over the network, and web/
-# is only the changelog-submission website).
 web/ export-ignore
 data/ export-ignore
 .github/ export-ignore
