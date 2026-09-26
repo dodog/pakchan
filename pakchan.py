@@ -20,11 +20,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib, Gdk, Gio, Pango
 
-# Vte gives us a real embedded terminal (proper pty, so `sudo`/makepkg
-# password & y/n prompts work exactly like in a normal terminal window).
-# It's optional: distros package it under different GI versions depending
-# on GTK4 support, and some systems won't have it at all — in that case
-# we fall back to a plain pty-backed text panel (see _run_update_subprocess).
+# Vte gives us a real embedded terminal
 Vte = None
 for _vte_ver in ("3.91", "2.91"):
     try:
@@ -36,26 +32,97 @@ for _vte_ver in ("3.91", "2.91"):
         continue
 _HAVE_VTE = Vte is not None
 
+# Minimal self-contained SUDO_ASKPASS fallback
+_ASKPASS_GTK_SCRIPT = '''#!/usr/bin/env python3
+import sys
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Gtk, Adw, Gio
+
+class AskpassApp(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id="com.pakchan.askpass",
+                          flags=Gio.ApplicationFlags.NON_UNIQUE)
+        self.connect("activate", self.on_activate)
+        self.cancelled = False
+
+    def on_activate(self, app):
+        self.win = Adw.ApplicationWindow(application=app)
+        self.win.set_title("Authentication Required")
+        self.win.set_default_size(380, -1)
+        self.win.set_resizable(False)
+        self.win.connect("close-request", self.on_close_request)
+
+        toolbar_view = Adw.ToolbarView()
+        toolbar_view.add_top_bar(Adw.HeaderBar())
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.set_margin_top(6)
+        box.set_margin_bottom(24)
+        box.set_margin_start(24)
+        box.set_margin_end(24)
+
+        heading = Gtk.Label(label="Authentication required")
+        heading.add_css_class("title-3")
+        heading.set_halign(Gtk.Align.START)
+        box.append(heading)
+
+        body = Gtk.Label(label="Enter your password to continue:")
+        body.set_halign(Gtk.Align.START)
+        box.append(body)
+
+        self.entry = Gtk.PasswordEntry()
+        self.entry.set_show_peek_icon(True)
+        self.entry.connect("activate", lambda *_a: self.submit_password())
+        box.append(self.entry)
+
+        btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        btn_box.set_halign(Gtk.Align.END)
+        btn_box.set_margin_top(6)
+        cancel_btn = Gtk.Button(label="Cancel")
+        cancel_btn.connect("clicked", lambda *_a: self.cancel())
+        ok_btn = Gtk.Button(label="OK")
+        ok_btn.add_css_class("suggested-action")
+        ok_btn.connect("clicked", lambda *_a: self.submit_password())
+        btn_box.append(cancel_btn)
+        btn_box.append(ok_btn)
+        box.append(btn_box)
+
+        toolbar_view.set_content(box)
+        self.win.set_content(toolbar_view)
+        self.win.present()
+        self.entry.grab_focus()
+
+    def on_close_request(self, *_a):
+        self.cancel()
+        return True
+
+    def cancel(self):
+        self.cancelled = True
+        self.quit()
+
+    def submit_password(self):
+        sys.stdout.write(self.entry.get_text() + "\\n")
+        sys.stdout.flush()
+        self.quit()
+
+app = AskpassApp()
+app.run(None)
+sys.exit(1 if app.cancelled else 0)
+'''
+
 # Disable WebKit process sandbox when user namespaces are unavailable
-# (avoids "CanCreateUserNamespace() clone() failure: EPERM" on some systems)
 import gzip, html, json, os, re, shlex, shutil, sys, tarfile, tempfile, threading, time
 
-# Used only by the no-Vte update fallback: strips ANSI/terminal control
-# sequences (cursor show/hide, colors, etc.) from raw pty output before
-# it's shown in a plain GtkTextView, which — unlike a real terminal —
-# doesn't interpret them and would otherwise display them as literal
-# text (e.g. a stray "[?25h").
+# Strip ANSI codes from raw pty output for the no-Vte fallback view
 _ANSI_ESCAPE_RE = re.compile(
     r'\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])')
 
+_VER_OP_RE = re.compile(r'[<>=].*$')
+
 os.environ.setdefault("WEBKIT_DISABLE_SANDBOX", "1")
-# Force GTK's software (Cairo) renderer instead of its default GL/Vulkan
-# path. On systems without a working Vulkan driver, GTK4 can fall back to
-# Zink (an OpenGL-over-Vulkan translation layer) and fail noisily —
-# "libEGL warning: ... MESA-LOADER ...", "ZINK: vkCreateInstance failed" —
-# even though the app still renders fine via software fallback. Forcing
-# Cairo up front avoids that driver probing (and its warnings) entirely;
-# for a widget-heavy app like this one there's no real performance cost.
+# Force GTK's Cairo renderer to avoid Zink/Vulkan driver warnings
 os.environ.setdefault("GSK_RENDERER", "cairo")
 import subprocess, urllib.request, urllib.error, urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -79,11 +146,15 @@ class Package:
     url:            str = ""
     depends:        str = ""
     checked:        bool = False
+    marked_remove:  bool = False      # True = this checkbox means "uninstall", not "install/update"
     is_dep:         bool = False
     has_desktop_entry: bool = False   # True if a .desktop launcher exists
     icon_name:      str = ""          # icon theme name to look up for this package's row
     size_bytes:     int = 0           # raw installed size, used for sorting (installed_size is display-only)
     changelog:      Optional[dict] = None
+    installed:      bool = True       # False = search result not yet installed
+    remote:         str = ""          # flatpak: remote to install from (e.g. "flathub"), for not-yet-installed search results
+    display_name:   str = ""          # nice name (e.g. "Text Editor") — falls back to `name` (the technical id) when empty
 
     @property
     def has_update(self) -> bool:
@@ -108,17 +179,11 @@ def run(cmd: list, timeout: int = 30) -> tuple:
 
 
 def run_git(cmd: list, timeout: int = 10) -> tuple:
-    """Run git command with shorter timeout (git can hang on blocked repos).
-    Default timeout is 10s vs 30s for general commands.
-    """
+    """Run git command with shorter timeout (git can hang on blocked repos)."""
     return run(cmd, timeout=timeout)
 
 
 # ─── Debug tracing ────────────────────────────────────────────────────────────
-#
-# A lightweight, always-on trace of every step the changelog resolver tries
-# for the currently-viewed package, so problems can be diagnosed directly
-# in the UI instead of guessing from the final result alone.
 
 _debug_trace: list[str] = []
 
@@ -133,13 +198,7 @@ def _dbg_get() -> list[str]:
 
 
 def http_get(url: str, timeout: int = 14) -> Optional[str]:
-    """
-    Many release-note sites (gimp.org, filezilla-project.org, etc.) reject
-    or redirect requests carrying an obviously non-browser User-Agent.
-    Sending realistic browser headers significantly improves success rate.
-    This is for fetching HTML PAGES — for JSON APIs, use http_get_json()
-    below, which sends a proper Accept: application/json header instead.
-    """
+    """Send realistic browser headers so release-note sites don't reject requests."""
     try:
         req = urllib.request.Request(url, headers={
             "User-Agent": (
@@ -169,14 +228,7 @@ def http_get(url: str, timeout: int = 14) -> Optional[str]:
 
 
 def http_get_json(url: str, timeout: int = 14):
-    """
-    Fetch and parse a JSON API endpoint. Uses its own request (rather than
-    delegating to http_get) because API endpoints — especially GitLab's
-    /api/v4/ routes behind bot-protection layers like Anubis — can return
-    406 Not Acceptable when sent an HTML-oriented Accept header. Sending
-    Accept: application/json first, with a normal browser User-Agent,
-    avoids both failure modes at once.
-    """
+    """Fetch and parse a JSON API endpoint"""
     try:
         req = urllib.request.Request(url, headers={
             "User-Agent": "Mozilla/5.0",
@@ -211,9 +263,7 @@ def http_get_json(url: str, timeout: int = 14):
 
 
 def _is_bot_protection_page(body: str) -> bool:
-    """Detect common bot-protection services returning challenge pages.
-    Returns True if the page looks like Anubis, Cloudflare, or similar.
-    """
+    """Detect common bot-protection services returning challenge pages."""
     if not body:
         return False
     low = body.lower()
@@ -293,12 +343,10 @@ def _read_local_db() -> dict:
     return pkgs
 
 
-def _read_sync_db_names() -> tuple[set, bool]:
-    """
-    Fix #4: Read names directly from /var/lib/pacman/sync/*.db (zlib tar files).
-    Returns (set_of_names, ok_flag).  Falls back to `pacman -Slq` if needed.
-    """
+def _read_sync_db() -> tuple[set, dict, bool]:
+    """Read pacman's sync databases directly"""
     names: set[str] = set()
+    full:  dict[str, dict] = {}
     db_files = list(PACMAN_SYNC.glob("*.db")) if PACMAN_SYNC.exists() else []
 
     if db_files:
@@ -306,48 +354,57 @@ def _read_sync_db_names() -> tuple[set, bool]:
             try:
                 with tarfile.open(db_path, "r:gz") as tf:
                     for member in tf.getmembers():
-                        # Each entry is "name-version/desc" or "name-version/"
-                        parts = member.name.split("/")
-                        if parts:
-                            # Strip version suffix: last hyphen-separated segment
-                            pkg_ver = parts[0]
-                            # name is everything before the last two hyphen groups
-                            segments = pkg_ver.rsplit("-", 2)
-                            if len(segments) >= 3:
-                                names.add(segments[0])
-                            elif len(segments) == 2:
-                                names.add(segments[0])
-                            else:
-                                names.add(pkg_ver)
+                        if member.isfile() and member.name.endswith("/desc"):
+                            try:
+                                text = tf.extractfile(member).read().decode(
+                                    "utf-8", "replace")
+                            except Exception:
+                                continue
+                            fields: dict[str, list] = {}
+                            cur = None
+                            for line in text.splitlines():
+                                line = line.strip()
+                                if line.startswith("%") and line.endswith("%"):
+                                    cur = line[1:-1].lower()
+                                    fields[cur] = []
+                                elif line and cur is not None:
+                                    fields[cur].append(line)
+                            name = " ".join(fields.get("name", []))
+                            if not name:
+                                continue
+                            names.add(name)
+                            full[name] = {
+                                "version": " ".join(fields.get("version", ["?"])),
+                                "desc":    " ".join(fields.get("desc", [""])),
+                                "url":     " ".join(fields.get("url", [""])),
+                                "license": " ".join(fields.get("license", [""])),
+                                "depends": ", ".join(fields.get("depends", [])),
+                                "conflicts": ", ".join(fields.get("conflicts", [])),
+                                "provides":  ", ".join(fields.get("provides", [])),
+                            }
+                        else:
+                            # Directory-only db entries still get recorded for repo classification
+                            parts = member.name.split("/")
+                            if parts and parts[0] and parts[0] not in names:
+                                pkg_ver = parts[0]
+                                segments = pkg_ver.rsplit("-", 2)
+                                names.add(segments[0] if len(segments) >= 2 else pkg_ver)
             except Exception:
                 pass
         if names:
-            return names, True
+            return names, full, True
 
-    # Fallback: subprocess
+    # Fallback: subprocess (names only)
     out, _, rc = run(["pacman", "-Slq"], timeout=12)
     if rc == 0 and out:
-        return set(out.splitlines()), True
-    return set(), False
+        return set(out.splitlines()), {}, True
+    return set(), {}, False
 
 
 # ─── Update detection ─────────────────────────────────────────────────────────
 
 def _pending_pacman_updates_from_sync(local_db: dict) -> dict:
-    """
-    Fallback update detection that doesn't depend on the pacman-contrib
-    `checkupdates` tool. `checkupdates` does its own background sync to a
-    temp copy of the databases, which needs network access and a writable
-    temp dir — if that's missing, blocked, or pacman-contrib simply isn't
-    installed, it fails (or isn't found) and the caller previously just
-    got an empty dict back with no way to tell "no updates" apart from
-    "couldn't check". This reads versions directly out of the databases
-    already synced to /var/lib/pacman/sync/*.db (the same files
-    _read_sync_db_names uses for package names) — no network needed —
-    and compares against the installed version with pacman's own
-    `vercmp` for a canonically correct result (handles epoch/pkgrel
-    exactly the way pacman itself does).
-    """
+    """Fallback update detection for when pacman-contrib's checkupdates is unavailable."""
     if not PACMAN_SYNC.exists() or not cmd_exists("vercmp"):
         return {}
 
@@ -387,9 +444,7 @@ def _pending_pacman_updates_from_sync(local_db: dict) -> dict:
         if not local_info:
             continue
         local_ver = local_info.get("version", "")
-        # Identical strings can never be an update — skip without paying
-        # for a vercmp call; only genuinely differing versions need the
-        # real comparison (epoch/pkgrel-aware, not a plain string compare).
+        # Identical strings can never be an update
         if not local_ver or local_ver == sync_ver:
             continue
         out, _, rc = run(["vercmp", sync_ver, local_ver], timeout=5)
@@ -412,12 +467,7 @@ def _pending_pacman_updates(local_db: Optional[dict] = None) -> dict:
                 result[p[0]] = p[3]
     if result or local_db is None:
         return result
-    # checkupdates found nothing — but that's indistinguishable here
-    # from checkupdates being missing entirely, or its background sync
-    # having failed silently. Don't treat that as "definitely no
-    # updates"; cross-check directly against the already-synced local
-    # databases instead, which needs no extra tool and no new network
-    # activity of its own.
+    # Cross-check checkupdates' empty result against the synced databases
     return _pending_pacman_updates_from_sync(local_db)
 
 
@@ -451,16 +501,7 @@ def _pending_flatpak_updates() -> dict:
 
 
 def _installed_flatpak_versions() -> dict:
-    """
-    Bulk-fetch installed Flatpak versions via a single `flatpak list`
-    call. Previously versions were read from each app's per-app
-    `metadata` file, but that file's format has no version= key at all
-    — it always fell through to a generic "installed" placeholder for
-    every Flatpak app. Only non-empty versions are recorded here: many
-    Flatpak apps don't declare an explicit version and just version by
-    branch (e.g. "stable"), which _flatpak_installed_version falls back
-    to when nothing is found here.
-    """
+    """Bulk-fetch installed Flatpak versions"""
     out, _, rc = run(["flatpak", "list", "--columns=application,version"], timeout=20)
     result = {}
     if rc == 0 and out:
@@ -475,42 +516,59 @@ def _installed_flatpak_versions() -> dict:
 
 # ─── Package enumeration (parallelised — fix #5) ──────────────────────────────
 
-def _parse_desktop_icon(desktop_path: Path) -> Optional[str]:
-    """Read the Icon= value from a .desktop file's [Desktop Entry] section."""
+def _preferred_lang_code() -> str:
+    """Locale language codebto pick a localized .desktop Name."""
+    for var in ("LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"):
+        val = os.environ.get(var, "")
+        if val and val not in ("C", "POSIX"):
+            code = val.split(":")[0].split(".")[0].split("_")[0]
+            if code:
+                return code.lower()
+    return ""
+
+
+def _parse_desktop_meta(desktop_path: Path, lang: str = "") -> tuple[Optional[str], Optional[str], bool]:
+    """Read Icon=, Name=, and NoDisplay= from a .desktop file's entry."""
     try:
         text = desktop_path.read_text(errors="replace")
     except Exception:
-        return None
+        return None, None, False
     in_section = False
+    icon = None
+    name_plain = None
+    name_localized = None
+    no_display = False
     for line in text.splitlines():
         line = line.strip()
         if line.startswith("[") and line.endswith("]"):
             in_section = (line == "[Desktop Entry]")
             continue
-        if in_section and line.startswith("Icon="):
-            val = line.split("=", 1)[1].strip()
-            return val or None
-    return None
+        if not in_section:
+            continue
+        if line.startswith("Icon="):
+            icon = line.split("=", 1)[1].strip() or icon
+        elif line.startswith("Name="):
+            name_plain = line.split("=", 1)[1].strip() or name_plain
+        elif lang and line.startswith(f"Name[{lang}]="):
+            name_localized = line.split("=", 1)[1].strip() or name_localized
+        elif line.startswith("NoDisplay="):
+            no_display = line.split("=", 1)[1].strip().lower() == "true"
+    return icon, (name_localized or name_plain), no_display
 
 
-def _desktop_entries_info() -> dict[str, str]:
-    """
-    For each installed package, determine whether it owns a .desktop
-    launcher file — the same signal PAMAC uses to separate "applications
-    you'd actually launch" from libraries/CLI tools/background services —
-    and, if so, read its declared icon name so the package list can show
-    a real app icon (again, like PAMAC) instead of a generic placeholder.
+# Suffixes marking a .desktop file as a companion tool, not the main app
+_AUXILIARY_DESKTOP_SUFFIXES = (
+    "-settings", "-preferences", "-prefs", "-config", "-configuration",
+    "-setup", "-properties", "-manager", "-uninstall", "-uninstaller",
+    "-about", "-wizard", "-autostart", "-service", "-daemon", "-tray",
+    "-background", "-kcm", "-mimeinfo", "-nautilus", "-thunar",
+)
 
-    Reads /var/lib/pacman/local/<pkg-ver>/files directly (already on disk,
-    no subprocess) to find the .desktop file's path, then reads that file
-    itself for its Icon= key.
 
-    Returns {pkg_name: icon_name}. icon_name is "" when a desktop file
-    exists but has no (or an unparseable) Icon= key — the key's mere
-    presence in the dict is what signals "this package has a launcher",
-    distinct from a package that owns no .desktop file at all.
-    """
-    result: dict[str, str] = {}
+def _desktop_entries_info() -> dict[str, tuple[str, str]]:
+    """For each installed package, resolve its .desktop icon and display name."""
+    lang = _preferred_lang_code()
+    result: dict[str, tuple[str, str]] = {}
     if not PACMAN_LOCAL.exists():
         return result
     for pkg_dir in PACMAN_LOCAL.iterdir():
@@ -530,14 +588,26 @@ def _desktop_entries_info() -> dict[str, str]:
         # Package name is the dir name minus the trailing "-version-rel"
         pkg_ver = pkg_dir.name
         segments = pkg_ver.rsplit("-", 2)
-        name = segments[0] if len(segments) >= 2 else pkg_ver
-        icon_name = ""
+        pkg_name = segments[0] if len(segments) >= 2 else pkg_ver
+        # A package can own more than one .desktop file
+        candidates = []
         for rel in desktop_rel_paths:
-            parsed = _parse_desktop_icon(Path("/" + rel.lstrip("/")))
-            if parsed:
-                icon_name = parsed
+            path = Path("/" + rel.lstrip("/"))
+            icon, dname, no_display = _parse_desktop_meta(path, lang)
+            stem = path.stem.lower()
+            is_auxiliary = stem.endswith(_AUXILIARY_DESKTOP_SUFFIXES)
+            candidates.append((no_display, is_auxiliary, len(stem), icon, dname))
+        candidates.sort(key=lambda c: c[:3])
+        icon_name = ""
+        display_name = ""
+        for _no_display, _is_auxiliary, _stem_len, icon, dname in candidates:
+            if icon and not icon_name:
+                icon_name = icon
+            if dname and not display_name:
+                display_name = dname
+            if icon_name and display_name:
                 break
-        result[name] = icon_name
+        result[pkg_name] = (icon_name, display_name)
     return result
 
 
@@ -550,7 +620,7 @@ def _load_pacman_aur(local_db: dict, sync_names: set,
         f_gui = ex.submit(_desktop_entries_info)
         pacman_pending  = f_pac.result()
         aur_pending     = f_aur.result() if f_aur else {}
-        desktop_icons   = f_gui.result()
+        desktop_info    = f_gui.result()
 
     pkgs = []
     for name, info in sorted(local_db.items()):
@@ -567,6 +637,7 @@ def _load_pacman_aur(local_db: dict, sync_names: set,
             size_bytes = int(raw_size) if raw_size else 0
         except ValueError:
             size_bytes = 0
+        icon_name, display_name = desktop_info.get(name, ("", ""))
         pkgs.append(Package(
             name=name, version=version, new_version=new_ver,
             description=info.get("desc", ""),
@@ -577,8 +648,9 @@ def _load_pacman_aur(local_db: dict, sync_names: set,
             url=info.get("url", ""),
             depends=info.get("depends", ""),
             is_dep=(reason == "1"),
-            has_desktop_entry=(name in desktop_icons),
-            icon_name=desktop_icons.get(name, ""),
+            has_desktop_entry=(name in desktop_info),
+            icon_name=icon_name,
+            display_name=display_name,
         ))
     return pkgs, pacman_pending, aur_pending
 
@@ -588,10 +660,15 @@ def _load_flatpak() -> list:
         return []
     fp_pending  = _pending_flatpak_updates()
     fp_versions = _installed_flatpak_versions()
+    lang        = _preferred_lang_code()
     flatpak_dirs = [d for d in [
         Path("/var/lib/flatpak/app"),
         Path.home() / ".local/share/flatpak/app",
     ] if d.exists()]
+    export_app_dirs = [
+        Path("/var/lib/flatpak/exports/share/applications"),
+        Path.home() / ".local/share/flatpak/exports/share/applications",
+    ]
     seen: set[str] = set()
     pkgs = []
     for base in flatpak_dirs:
@@ -605,14 +682,49 @@ def _load_flatpak() -> list:
                 continue
             seen.add(app_id)
             ver = _flatpak_installed_version(app_dir, fp_versions.get(app_id, ""))
+            display_name = ""
+            for export_dir in export_app_dirs:
+                desktop_path = export_dir / f"{app_id}.desktop"
+                if desktop_path.exists():
+                    _icon, dname, _no_display = _parse_desktop_meta(desktop_path, lang)
+                    if dname:
+                        display_name = dname
+                        break
             pkgs.append(Package(
                 name=app_id, version=ver,
                 new_version=fp_pending.get(app_id, ""),
                 description="", repo="flatpak",
                 has_desktop_entry=True,   # Flatpak apps always ship a .desktop file
                 icon_name=app_id,         # Flatpak exports its icon under the app ID
+                display_name=display_name,
             ))
     return pkgs
+
+
+def _flatpak_search(q: str) -> list[dict]:
+    """Search all configured Flatpak remotes via `flatpak search`."""
+    if not cmd_exists("flatpak"):
+        return []
+    out, _, rc = run(["flatpak", "search", q], timeout=8)
+    if rc != 0 or not out:
+        return []
+    results = []
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 6:
+            continue
+        name, desc, app_id, version, branch, remotes = parts[:6]
+        app_id = app_id.strip()
+        # A real app ID is reverse-DNS-shaped (org.gimp.GIMP)
+        if not app_id or app_id.count(".") < 2:
+            continue
+        remote = (remotes.split(";")[0].strip() if remotes else "") or "flathub"
+        results.append({
+            "app_id": app_id, "name": name.strip() or app_id,
+            "desc": desc.strip(), "version": version.strip(),
+            "remote": remote,
+        })
+    return results
 
 
 def _load_snap() -> list:
@@ -637,14 +749,7 @@ def _load_snap() -> list:
 
 
 def _flatpak_installed_version(app_dir: Path, cli_version: str = "") -> str:
-    """
-    Prefer the version from `flatpak list` (see _installed_flatpak_versions
-    — bulk-fetched once, not per-app). Many Flatpak apps don't declare an
-    explicit version at all and just version by branch (e.g. "stable",
-    "23.08"), in which case fall back to the installed branch name so
-    there's still something meaningful shown instead of a generic
-    "installed" placeholder.
-    """
+    """Prefer the version from `flatpak list`."""
     if cli_version:
         return cli_version
     try:
@@ -655,14 +760,10 @@ def _flatpak_installed_version(app_dir: Path, cli_version: str = "") -> str:
     return "installed"
 
 
-def get_all_packages_fast() -> tuple[list, bool]:
-    """
-    Fix #5: Parallel loading. Returns (packages, sync_names_ok).
-    Pacman/AUR local DB read is instant; update checks run in parallel with
-    Flatpak/Snap enumeration.
-    """
-    local_db            = _read_local_db()
-    sync_names, sync_ok = _read_sync_db_names()
+def get_all_packages_fast() -> tuple[list, dict, bool]:
+    """Parallel loading pacman/AUR, Flatpak/Snap"""
+    local_db                        = _read_local_db()
+    sync_names, sync_full, sync_ok  = _read_sync_db()
     aur_helper          = next(
         (h for h in ["yay", "paru"] if cmd_exists(h)), None)
 
@@ -676,16 +777,13 @@ def get_all_packages_fast() -> tuple[list, bool]:
 
     all_pkgs = sorted(pacaur_pkgs + flatpak_pkgs + snap_pkgs,
                       key=lambda p: p.name.lower())
-    return all_pkgs, sync_ok
+    return all_pkgs, sync_full, sync_ok
 
 
 # ─── On-demand enrichment ─────────────────────────────────────────────────────
 
 def _flatpak_appstream_component(app_id: str) -> dict:
-    """
-    Fix #13: Re-enabled AppStream XML with correct per-component extraction.
-    Searches local appstream cache dirs for the component block.
-    """
+    """AppStream XML extraction."""
     search_dirs = [
         Path("/var/lib/flatpak/appstream"),
         Path.home() / ".local/share/flatpak/appstream",
@@ -732,25 +830,20 @@ def _flatpak_appstream_component(app_id: str) -> dict:
                 u = re.search(r'<url[^>]*>([^<]+)</url>', block)
             if u:
                 result["url"] = u.group(1).strip()
+            n = re.search(r'<name[^>]*xml:lang="en"[^>]*>([^<]+)</name>', block)
+            if not n:
+                n = re.search(r'<name(?!\s[^>]*xml:lang)([^>]*)>([^<]+)</name>', block)
+                if n:
+                    result["name"] = html.unescape(n.group(2).strip())
+            else:
+                result["name"] = html.unescape(n.group(1).strip())
             if result:
                 return result
     return {}
 
 
 def _local_appstream_releases(pkg_name: str) -> Optional[dict]:
-    """
-    Desktop apps installed via pacman/AUR usually ship an AppStream
-    metainfo/appdata XML in /usr/share/metainfo/ or /usr/share/appdata/
-    containing a <releases> block — the same structured release data
-    Flatpak/Flathub uses, but already on disk.
-
-    Matching is done against the reverse-DNS AppStream ID's individual
-    dot-separated components (e.g. "krita" matches org.kde.krita.appdata.xml
-    via its "krita" component), NOT a raw substring search — a substring
-    check would (and did) match unrelated files like
-    io.github.realmazharhussain.GdmSettings.metainfo.xml for the package
-    "gdm", because "gdm" is a substring of "GdmSettings".
-    """
+    """Read release history from a package's local AppStream metainfo XML."""
     search_dirs = [
         Path("/usr/share/metainfo"),
         Path("/usr/share/appdata"),
@@ -763,11 +856,6 @@ def _local_appstream_releases(pkg_name: str) -> Optional[dict]:
             continue
         try:
             for xml_path in base.glob("*.xml"):
-                # AppStream IDs are dot-separated, e.g.
-                # "io.github.realmazharhussain.GdmSettings.metainfo" or
-                # "org.kde.krita.appdata" — split on dots and require an
-                # EXACT (case-insensitive) match against one component,
-                # not a substring match against the whole filename.
                 stem = xml_path.stem  # strips ".xml"
                 for suffix in (".appdata", ".metainfo"):
                     if stem.endswith(suffix):
@@ -791,8 +879,7 @@ def _local_appstream_releases(pkg_name: str) -> Optional[dict]:
         except Exception:
             continue
 
-        # Match each <release ...> tag regardless of attribute order or
-        # whether it's self-closing — extract attrs and body separately.
+        # Match each <release ...> tag
         release_blocks = re.findall(
             r'<release\b([^>]*?)(/?)>(.*?)(?:</release>|(?=<release|\Z))',
             text, re.DOTALL)
@@ -830,13 +917,15 @@ def _local_appstream_releases(pkg_name: str) -> Optional[dict]:
 def enrich_pkg(pkg: Package):
     """Fill in missing fields when a package is selected."""
     if pkg.repo == "flatpak":
-        # 1. Local AppStream XML (fix #13)
-        if not pkg.description or not pkg.url:
+        # 1. Local AppStream XML
+        if not pkg.description or not pkg.url or not pkg.display_name:
             info = _flatpak_appstream_component(pkg.name)
             if info.get("description") and not pkg.description:
                 pkg.description = info["description"]
             if info.get("url") and not pkg.url:
                 pkg.url = info["url"]
+            if info.get("name") and not pkg.display_name:
+                pkg.display_name = info["name"]
 
         # 2. flatpak info subprocess
         if not pkg.description or not pkg.url or not pkg.installed_size:
@@ -880,27 +969,25 @@ MAPPINGS_CACHE = CACHE_DIR / "mappings.json"
 CHANGELOG_DB   = CACHE_DIR / "changelogs.json"
 CL_MAX_AGE_S   = 7 * 86400   # 7 days — fix #6
 
+# AUR's full metadata dump, cached locally
+AUR_META_URL       = "https://aur.archlinux.org/packages-meta-ext-v1.json.gz"
+AUR_META_CACHE     = CACHE_DIR / "aur_meta.json.gz"
+AUR_META_MAX_AGE_S = 24 * 3600
+KNOWN_AUR_META: dict[str, dict] = {}   # {name: {version, desc, url, license, depends}}
+
 KNOWN_GITHUB_REPOS:  dict[str, str]             = {}
 KNOWN_GITLAB_REPOS:  dict[str, tuple[str, str]] = {}
 KNOWN_RELEASE_PAGES: dict[str, str]             = {}
+
+# Algorithm selection
 DEFAULT_CUSTOM: dict[str, dict] = {
-    "firefox": {"parser": "mozilla", "url": "https://www.mozilla.org/en-US/firefox/releases/"},
-    "thunderbird": {"parser": "mozilla", "url": "https://www.thunderbird.net/en-US/thunderbird/releases/"},
-    # Note: Krita previously had a dedicated custom parser here, but its
-    # output was unreliable in practice and has been removed — it now
-    # falls through to the generic release-page scraper (or a plain link)
-    # via the "krita" entry in mappings.json's "release_pages" section.
-    "scribus": {
-        "parser": "mantisbt",
-        "url": "https://bugs.scribus.net/changelog_page.php",
-    },
-    # Use the Atom newsfeed which contains release announcements and summaries
-    "filezilla": {"parser": "filezilla", "url": "https://filezilla-project.org/newsfeed.php"},
+    "firefox":     {"parser": "mozilla"},
+    "thunderbird": {"parser": "mozilla"},
+    "filezilla":   {"parser": "filezilla"},
 }
 KNOWN_CUSTOM:        dict[str, dict]            = DEFAULT_CUSTOM.copy()   # custom parsers (merged with mappings)
 
-# Known GitLab-like hosts that do not literally contain "gitlab" in the hostname
-# (invent.kde.org, source.kde.org, etc). Extend this list if you find more.
+# Known GitLab-like hosts
 KNOWN_GITLAB_LIKE = {
     "gitlab.com",
     "gitlab.gnome.org",
@@ -914,9 +1001,7 @@ def _apply_mappings(data: dict):
     global KNOWN_GITHUB_REPOS, KNOWN_GITLAB_REPOS, KNOWN_RELEASE_PAGES, KNOWN_CUSTOM
     KNOWN_GITHUB_REPOS  = data.get("github", {})
     KNOWN_RELEASE_PAGES = data.get("release_pages", {})
-    # Merge any remotely-provided custom mappings with local defaults.
-    # Do not discard default metadata such as host/repo when the remote
-    # mapping only provides a parser or URL override.
+    # Merge any remotely-provided custom mappings with local defaults
     KNOWN_CUSTOM = {}
     for pkg, entry in DEFAULT_CUSTOM.items():
         KNOWN_CUSTOM[pkg] = dict(entry)
@@ -954,6 +1039,94 @@ def _refresh_mappings_bg():
                 _apply_mappings(data)
             except Exception:
                 pass
+    threading.Thread(target=_fetch, daemon=True).start()
+
+
+def _parse_aur_meta(gz_bytes: bytes) -> dict[str, dict]:
+    """Parse AUR's packages-meta-ext-v1.json.gz into a name-keyed lookup."""
+    try:
+        raw  = gzip.decompress(gz_bytes)
+        data = json.loads(raw)
+    except Exception as e:
+        print(f"[aur-meta] decompress/parse failed: {e}", file=sys.stderr)
+        return {}
+    result: dict[str, dict] = {}
+    if not isinstance(data, list):
+        print(f"[aur-meta] unexpected top-level JSON type: {type(data).__name__} "
+              f"(expected a list)", file=sys.stderr)
+        return result
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("Name")
+        if not name:
+            continue
+        result[name] = {
+            "version": entry.get("Version") or "?",
+            "desc":    entry.get("Description") or "",
+            "url":     entry.get("URL") or "",
+            "license": ", ".join(entry.get("License") or []),
+            "depends": ", ".join(entry.get("Depends") or []),
+            "conflicts": ", ".join(entry.get("Conflicts") or []),
+            "provides":  ", ".join(entry.get("Provides") or []),
+        }
+    print(f"[aur-meta] parsed {len(result)} packages", file=sys.stderr)
+    return result
+
+
+def _load_aur_meta_from_cache():
+    """Load from disk cache."""
+    global KNOWN_AUR_META
+    if AUR_META_CACHE.exists():
+        try:
+            KNOWN_AUR_META = _parse_aur_meta(AUR_META_CACHE.read_bytes())
+            print(f"[aur-meta] loaded {len(KNOWN_AUR_META)} packages from "
+                  f"disk cache ({AUR_META_CACHE})", file=sys.stderr)
+        except Exception as e:
+            print(f"[aur-meta] failed to read disk cache: {e}", file=sys.stderr)
+    else:
+        print(f"[aur-meta] no disk cache yet at {AUR_META_CACHE} — "
+              f"waiting for background fetch", file=sys.stderr)
+
+
+def _refresh_aur_meta_bg():
+    """Refresh AUR's metadata dump in the background if the cache is stale."""
+    def _fetch():
+        global KNOWN_AUR_META
+        need_refresh = True
+        if AUR_META_CACHE.exists():
+            age = time.time() - AUR_META_CACHE.stat().st_mtime
+            need_refresh = age > AUR_META_MAX_AGE_S
+        if not need_refresh:
+            print(f"[aur-meta] disk cache is fresh enough, skipping "
+                  f"background re-fetch", file=sys.stderr)
+            return
+        print(f"[aur-meta] fetching {AUR_META_URL} …", file=sys.stderr)
+        try:
+            req = urllib.request.Request(
+                AUR_META_URL, headers={"User-Agent": "Pakchan/2.0"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                gz_bytes = r.read()
+        except Exception as e:
+            print(f"[aur-meta] fetch failed: {e}", file=sys.stderr)
+            return
+        if not gz_bytes:
+            print("[aur-meta] fetch returned no data", file=sys.stderr)
+            return
+        print(f"[aur-meta] fetched {len(gz_bytes)} bytes, parsing…", file=sys.stderr)
+        parsed = _parse_aur_meta(gz_bytes)
+        if not parsed:
+            print("[aur-meta] parse produced 0 packages — not caching or "
+                  "swapping in this result", file=sys.stderr)
+            return
+        try:
+            CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            AUR_META_CACHE.write_bytes(gz_bytes)
+        except Exception as e:
+            print(f"[aur-meta] failed to write disk cache: {e}", file=sys.stderr)
+        KNOWN_AUR_META = parsed
+        print(f"[aur-meta] ready: {len(KNOWN_AUR_META)} packages available "
+              f"for search", file=sys.stderr)
     threading.Thread(target=_fetch, daemon=True).start()
 
 
@@ -1100,137 +1273,34 @@ def _scrape_custom(pkg_name: str, entry: dict, target_version: str = "") -> Opti
             return _gitlab_releases(host, repo, pkg_name, target_version)
         return None
 
-    url    = entry.get("url", "")
+    url = entry.get("url", "")
+
+    # Firefox/Thunderbird use Mozilla's JSON API instead of scraping `url`
+    if parser == "mozilla":
+        body = http_get(url, timeout=16) if url else ""
+        return _scrape_mozilla(url, body or "", pkg_name, target_version)
+
     if not url:
         return None
+
     body = http_get(url, timeout=16)
     if not body:
         return None
-    if parser == "mantisbt":
-        result = _scrape_mantisbt(body, url)
-        if result and result.get("versions"):
-            return result
-        host = entry.get("host", "")
-        repo = entry.get("repo", "")
-        if host and repo:
-            gitlab_result = _gitlab_releases(host, repo, pkg_name, target_version)
-            if gitlab_result and gitlab_result.get("versions"):
-                return gitlab_result
-        # Detect if the page is a bot-protection challenge (Anubis, Cloudflare, etc)
-        # and try git fallback instead of giving up
-        if _is_bot_protection_page(body):
-            _dbg(f"[mantisbt] bot-protection page detected, trying git fallback")
-            host = entry.get("host", "")
-            repo = entry.get("repo", "")
-            if host and repo:
-                gitlab_result = _gitlab_releases(host, repo, pkg_name, target_version)
-                if gitlab_result and gitlab_result.get("versions"):
-                    return gitlab_result
-        if url:
-            return {
-                "versions": [{"version": pkg_name, "date": "",
-                              "changes": [f"See {url} for details."]}],
-                "source": f"Custom (mantisbt) — {url}",
-                "_link_only": True,
-                "_link_url": url,
-            }
-        return None
     if parser == "text_file":
-        # Some "text_file" mappings actually point at markdown-formatted
-        # NEWS/RELEASE-NOTES files — e.g. Electrum's RELEASE-NOTES uses
-        # "# Release X.Y.Z (date)" headings, the same single-# pattern
-        # PipeWire's NEWS file uses. Detect that regardless of what the
-        # mapping declares and use the markdown-aware parser when it
-        # applies, since it handles headings (and version extraction)
-        # far more reliably than the plain-text heuristic parser.
+        # Detect markdown-formatted NEWS files even when mapped as plain text
         if _looks_like_markdown_changelog(body):
             return _scrape_github_raw_changelog(body)
         return _scrape_text_file(body)
     if parser == "github_raw":
         return _scrape_github_raw_changelog(body)
-    if parser == "mozilla":
-        return _scrape_mozilla(url, body)
     if parser == "filezilla":
         return _scrape_filezilla_changelog(body, url)
-    # Unknown parser type — nothing we know how to parse; caller falls
-    # back to showing a direct link to `url`.
+    # Unknown parser type
     return None
 
 
-def _scrape_mantisbt(body: str, url: str) -> Optional[dict]:
-    """
-    Parse MantisBT changelog pages like xnview.com/mantisbt/changelog_page.php
-
-    Real structure (confirmed against the live page): each release is a
-    link whose href contains a 'version_id=' query parameter and whose
-    LINK TEXT is the version number itself, e.g.:
-        <a href="changelog_page.php?version_id=123">2.45</a>
-    followed by a list of issue entries (bug/feature summaries) until the
-    next such link. There is no dedicated "version heading" tag/class —
-    earlier attempts assuming a <td class="version"> or <h2> structure
-    were matching unrelated numbers (issue IDs, dates) instead.
-    """
-    # Find every (version_text, start_offset, end_offset) for version_id links
-    anchors = []
-    for m in re.finditer(
-            r'<a[^>]+href="[^"]*version_id=\d+[^"]*"[^>]*>\s*'
-            r'([\d]+\.[\d.]+(?:\s*\([^)]*\))?)\s*</a>',
-            body, re.IGNORECASE):
-        ver = re.sub(r'\s*\([^)]*\)\s*$', '', m.group(1)).strip()  # drop "(Not yet released)" etc.
-        anchors.append((ver, m.start(), m.end()))
-
-    if not anchors:
-        return None
-
-    # Deduplicate consecutive identical versions (MantisBT sometimes lists
-    # the same version twice — once as a TOC entry, once as a section start)
-    deduped = []
-    for ver, start, end in anchors:
-        if deduped and deduped[-1][0] == ver:
-            continue
-        deduped.append((ver, start, end))
-
-    versions = []
-    for i, (ver, start, end) in enumerate(deduped[:8]):
-        next_start = deduped[i + 1][1] if i + 1 < len(deduped) else len(body)
-        segment = body[end:next_start]
-
-        # Issue entries are typically list items or table rows containing
-        # an issue ID like "0003291:" followed by a one-line summary.
-        items = re.findall(r'<li[^>]*>(.*?)</li>', segment, re.DOTALL)
-        if not items:
-            items = re.findall(r'<td[^>]*>(.*?)</td>', segment, re.DOTALL)
-
-        changes = []
-        for item in items:
-            text = _strip_html(item).strip()
-            # Strip a leading "0003291: [Bug] " style prefix down to the
-            # readable description, but keep the [Bug]/[New] tag — it's
-            # useful context (bugfix vs new feature).
-            text = re.sub(r'^\d{5,}:\s*', '', text)
-            if 5 < len(text) < 300:
-                changes.append(text)
-
-        versions.append({
-            "version": ver,
-            "date": "",
-            "changes": changes[:10] or [f"Release {ver}"],
-        })
-
-    return {"versions": versions, "source": f"MantisBT — {url}"} if versions else None
-
-
 def _scrape_text_file(body: str) -> Optional[dict]:
-    """
-    Parse a plain-text changelog/release-notes file (no HTML at all).
-    Handles formats like:
-      eID klient 5.31 (2024-11-20)     ← app-name prefixed, English
-      eID klient verzia 5.31           ← Slovak "verzia" = "version"
-      Version 5.31 / v5.31 / [5.31] / 5.31 - 2024-11-20
-    This is kept as a dedicated parser (rather than folded into the
-    universal HTML scraper) because plain text has no tags at all —
-    a fundamentally different format, not just a different site layout.
-    """
+    """Parse a plain-text changelog/release-notes file (no HTML at all)."""
     versions: list[dict] = []
     lines = body.splitlines()
 
@@ -1303,44 +1373,19 @@ def _scrape_text_file(body: str) -> Optional[dict]:
 
 
 def _looks_like_markdown_changelog(body: str) -> bool:
-    """
-    True if the file uses Markdown-style headings (single "#", "##", or
-    "###") to separate release entries, rather than a purely plain-text
-    NEWS format. Previously this only checked for "##" specifically,
-    which missed files (like PipeWire's NEWS) that use a single "#" per
-    release — those got routed to the much less capable plain-text
-    parser instead of the markdown-aware one.
-    """
+    """True if the file uses Markdown-style headings."""
     return bool(re.search(r'(?m)^#{1,3}[ \t]', body[:2000]))
 
 
 def _scrape_github_raw_changelog(body: str) -> Optional[dict]:
-    """Parse a raw CHANGELOG/RELEASE-NOTES/NEWS file (Markdown headings)
-    into per-version entries.
-
-    Handles headings like:
-        ## [1.2.3] - 2024-01-01
-        ## 1.2.3
-        # v1.2.3
-        # PipeWire 1.6.0 (2026-02-19)      <- project-name prefix
-
-    The project-name-prefix form was previously unsupported (the old
-    regex required a version number immediately after the "#" marker),
-    which meant files using it — like PipeWire's NEWS — fell straight
-    through to the much less reliable plain-text parser and could miss
-    the true latest entry entirely, letting some unrelated fragment
-    further down get misparsed as the "newest" version instead.
-    """
+    """Parse a raw CHANGELOG/RELEASE-NOTES/NEWS file (Markdown headings)."""
     versions = []
     heading_re = re.compile(
         r'^(#{1,3}[ \t]+[^\n]*)\n'      # group 1: the whole heading line (single line only)
         r'(.*?)'                        # group 2: body until next heading/EOF
         r'(?=^#{1,3}[ \t]+|\Z)',
         re.DOTALL | re.MULTILINE)
-    # Version number must appear within the first few words of the
-    # heading (at most 3 leading project-name-like words) — this avoids
-    # false positives on unrelated headings that merely mention a number
-    # somewhere in a sentence, e.g. "## Requirements: GTK 4.0 or later".
+    # Version number must appear within the first few words
     version_in_heading_re = re.compile(
         r'^#{1,3}[ \t]+(?:[A-Za-z][\w.+-]{0,20}[ \t]+){0,3}'
         r'\[?v?(\d+\.\d[\d.]*(?:-[\w.]+)?)\]?')
@@ -1368,38 +1413,67 @@ def _scrape_github_raw_changelog(body: str) -> Optional[dict]:
 
 # ── Mozilla ───────────────────────────────────────────────────────────────────
 
-def _scrape_mozilla(url: str, body: str) -> Optional[dict]:
-    """
-    Priority:
-    1. product-details.mozilla.org JSON API (structured, most reliable)
-    2. Scrape releases index for version links → fetch each notes page in parallel
-    """
-    # Thunderbird check must come first — thunderbird.net URLs also contain no "firefox"
-    is_thunderbird = "thunderbird" in url
+def _scrape_mozilla(url: str, body: str, pkg_name: str = "", target_version: str = "") -> Optional[dict]:
+    """Try the product-details JSON API first, then fall back to scraping the releases index."""
+    # Determine Thunderbird-vs-Firefox from the package name, not the URL
+    is_thunderbird = "thunderbird" in pkg_name.lower()
     prod  = "thunderbird" if is_thunderbird else "firefox"
-    base  = "https://www.thunderbird.net" if is_thunderbird else "https://www.mozilla.org"
+    base  = "https://www.thunderbird.net" if is_thunderbird else "https://www.firefox.com"
+
+    # The pacman/AUR "firefox" package tracks mainline releases
+    is_esr = (not is_thunderbird) and "esr" in pkg_name.lower()
 
     # 1. Try product-details JSON
     pd = http_get_json(f"https://product-details.mozilla.org/1.0/{prod}.json")
+    if not pd or not isinstance(pd, dict):
+        _dbg(f"[mozilla] product-details JSON: fetch/parse failed for {prod}")
     if pd and isinstance(pd, dict):
         releases = pd.get("releases", {})
-        items = sorted(
-            [(k, v) for k, v in releases.items()
-             if isinstance(v, dict) and v.get("date")
-             and v.get("category") in ("major", "stability", "esr")],
-            key=lambda x: x[1].get("date", ""),
-            reverse=True
-        )[:5]
+        pool = [(k, v) for k, v in releases.items()
+                if isinstance(v, dict) and v.get("date")
+                and v.get("category") in ("major", "stability", "esr")]
+        pool = [(k, v) for k, v in pool if ("esr" in k.lower()) == is_esr]
+        items = sorted(pool, key=lambda x: x[1].get("date", ""), reverse=True)[:5]
+        # Prefer the exact target version's own entry when it's known
+        stripped_target = _strip_pacman_epoch_pkgrel(target_version) if target_version else ""
+        target_key = f"{prod}-{stripped_target}" if stripped_target else ""
+        if (target_key and target_key in releases
+                and not any(k == target_key for k, _ in items)):
+            _dbg(f"[mozilla] target version {stripped_target!r} not in the "
+                 f"top-N-by-date window — adding it explicitly")
+            items = [(target_key, releases[target_key])] + items
+            items = items[:6]
+        if not items:
+            _dbg(f"[mozilla] product-details JSON: fetched OK but 0 matching "
+                 f"releases (got {len(releases)} raw entries, is_esr={is_esr})")
         if items:
+            top_cat = releases.get(items[0][0], {}).get("category")
+            _dbg(f"[mozilla] product-details JSON: top candidate "
+                 f"{items[0][1].get('version')} ({items[0][1].get('date')}) "
+                 f"key={items[0][0]!r} category={top_cat!r} "
+                 f"pkg_name={pkg_name!r} target_version={target_version!r} "
+                 f"is_esr={is_esr}")
+            _dbg("[mozilla] full candidate pool: " + ", ".join(
+                f"{k}(cat={v.get('category')!r},date={v.get('date')})"
+                for k, v in items))
+            if stripped_target:
+                exact = releases.get(target_key)
+                _dbg(f"[mozilla] exact key {target_key!r} in dataset: "
+                     f"{exact if exact else 'NOT FOUND'}")
             note_urls = [f"{base}/en-US/{prod}/{v.get('version', k)}/releasenotes/"
                          for k, v in items]
             pages     = _fetch_parallel(note_urls, timeout=12)
+            fetched   = sum(1 for u in note_urls if pages.get(u))
+            _dbg(f"[mozilla] release notes pages: fetched {fetched}/{len(note_urls)}")
             versions  = []
             for (k, info), note_url in zip(items, note_urls):
                 ver     = str(info.get("version", k))
                 date    = str(info.get("date", ""))[:10]
                 notes   = pages.get(note_url) or ""
                 changes = _parse_mozilla_notes(notes)
+                if not changes:
+                    _dbg(f"[mozilla] {ver}: page fetched but parser found "
+                         f"0 change entries (page len={len(notes)})")
                 versions.append({"version": ver, "date": date,
                                   "changes": changes[:10] or [f"Release {ver}"]})
             if versions:
@@ -1407,6 +1481,7 @@ def _scrape_mozilla(url: str, body: str) -> Optional[dict]:
                         "source": "Mozilla product-details + release notes"}
 
     # 2. Scrape the releases index page body
+    _dbg(f"[mozilla] falling back to index-page scrape (body len={len(body or '')})")
     clean     = _strip_noise_blocks(body)
     ver_links = list(dict.fromkeys(re.findall(
         rf'/{prod}/([\d]+\.[\d.]+(?:esr)?)/releasenotes/', clean)))[:5]
@@ -1416,6 +1491,7 @@ def _scrape_mozilla(url: str, body: str) -> Optional[dict]:
             r'>([\d]+\.[\d]+(?:\.[\d]+)?(?:esr)?)<', clean)))[:5]
 
     if not ver_links:
+        _dbg("[mozilla] index-page scrape: no version links found either — giving up")
         return None
 
     note_urls = [f"{base}/en-US/{prod}/{v}/releasenotes/" for v in ver_links]
@@ -1430,23 +1506,17 @@ def _scrape_mozilla(url: str, body: str) -> Optional[dict]:
 
 
 def _parse_mozilla_notes(html_text: str) -> list[str]:
-    """
-    Extract actual change entries from a Mozilla/Thunderbird release notes page.
-    The page has sections like 'New', 'Fixed', 'Changed', 'Security fixes'.
-    We must skip navigation, CSS, JavaScript, and header/footer noise.
-    """
+    """Extract actual change entries from a Mozilla/Thunderbird release notes page."""
     if not html_text:
         return []
 
     # Step 1: Remove obvious noise blocks before any parsing
-    # Strip <head>, <nav>, <header>, <footer>, <script>, <style>
     clean = html_text
     for tag in ("head", "nav", "header", "footer", "script", "style"):
         clean = re.sub(rf'<{tag}[^>]*>.*?</{tag}>', '', clean,
                        flags=re.DOTALL | re.IGNORECASE)
 
     # Step 2: Try to find the main content area
-    # Mozilla notes pages have <main> or <div class="*notes*"> or <article>
     main_match = re.search(
         r'<(?:main|article)[^>]*>(.*?)</(?:main|article)>',
         clean, re.DOTALL | re.IGNORECASE)
@@ -1486,7 +1556,6 @@ def _parse_mozilla_notes(html_text: str) -> list[str]:
         return changes[:12]
 
     # Step 4: Look for section headings + their list items
-    # Modern Mozilla pages: <section> or <div> with class containing new/fixed/changed/security
     sections = re.findall(
         r'<(?:section|div)[^>]*class="[^"]*'
         r'(?:new|fixed|changed|security|developer|enterprise)[^"]*"[^>]*>'
@@ -1519,11 +1588,7 @@ def _parse_mozilla_notes(html_text: str) -> list[str]:
 
 
 def _scrape_filezilla_changelog(body: str, url: str) -> Optional[dict]:
-    """Parse FileZilla's changelog.php page into versions.
-
-    This parser looks for headings containing version-like strings and
-    collects nearby list items or paragraphs as change entries.
-    """
+    """Parse FileZilla's changelog.php page into versions."""
     if not body:
         return None
 
@@ -1581,20 +1646,7 @@ def _scrape_filezilla_changelog(body: str, url: str) -> Optional[dict]:
     return None
 
 
-# ─── Generic release-notes scraper (for arbitrary "release_pages" sites) ────
-#
-# Sites in mappings.json's "release_pages" section (Blender, GIMP, KeePass,
-# nano, Samba, VLC, VirtualBox, etc.) have no shared structure, so a
-# dedicated per-site parser for each one doesn't scale. Instead, this looks
-# for the *pattern* nearly all of them share: a repeating heading (h1-h4) or
-# table row containing a version number, followed by descriptive text or
-# list items until the next one.
-#
-# Because this is inherently heuristic, it only returns a result when it
-# finds at least MIN_ENTRIES plausible, distinct version sections with real
-# content. Otherwise it returns None, and the caller falls back to the
-# simple "see <url> for details" link — which is always correct, even when
-# this scraper isn't confident enough to trust its own output.
+# ─── Generic release-notes scraper (for arbitrary "release_pages" sites) ─────
 
 _GENERIC_HEADING_RE = re.compile(
     r'<(h[1-4])[^>]*>(.*?)</\1>', re.IGNORECASE | re.DOTALL)
@@ -1623,8 +1675,7 @@ def _normalize_date_str(raw: str) -> str:
 
 
 def _extract_generic_block_changes(block_html: str) -> list[str]:
-    """Pull descriptive lines out of the HTML between one version heading
-    (or table row) and the next — list items if present, else paragraphs."""
+    """Pull descriptive lines from the HTML between one version heading and the next."""
     items = re.findall(r'<li[^>]*>(.*?)</li>', block_html, re.DOTALL)
     if items:
         changes = [_strip_html(i).strip() for i in items]
@@ -1659,17 +1710,7 @@ def _scrape_headings_for_versions(html_text: str) -> list[dict]:
 
 
 def _scrape_bold_or_dt_for_versions(html_text: str) -> list[dict]:
-    """
-    Strategy: some changelog pages mark each release with bold text or a
-    <dt> term rather than a real <hN> heading — e.g. MediaWiki-rendered
-    wikis like VirtualBox's Changelog page, which uses
-    "<b>VirtualBox 7.2.14</b> (released ...)" followed by a <ul> of fixes,
-    not an actual heading tag. Tried only as a fallback when heading-based
-    detection finds nothing meaningful, since <b>/<strong> are common for
-    plain emphasis too and are a noisier signal than real headings — the
-    block window is capped so a false match can't swallow huge amounts of
-    unrelated page content.
-    """
+    """Fallback: some changelog pages mark releases with bold text, not headings."""
     matches = list(re.finditer(
         r'<(b|strong|dt)[^>]*>(.*?)</\1>', html_text, re.IGNORECASE | re.DOTALL))
     versions = []
@@ -1690,9 +1731,7 @@ def _scrape_bold_or_dt_for_versions(html_text: str) -> list[dict]:
 
 
 def _scrape_table_rows_for_versions(html_text: str) -> list[dict]:
-    """Strategy 2: a simple table of releases (version/date/notes columns)
-    — common on "list of all versions" pages that aren't really a
-    changelog, just an index (e.g. Samba's history page)."""
+    """Fallback: parse a simple table of releases (version/date/notes)."""
     rows = re.findall(r'<tr[^>]*>(.*?)</tr>', html_text, re.DOTALL | re.IGNORECASE)
     versions = []
     for row in rows:
@@ -1713,14 +1752,7 @@ def _scrape_table_rows_for_versions(html_text: str) -> list[dict]:
 
 
 def _scrape_index_links_for_versions(html_text: str) -> list[tuple]:
-    """
-    Strategy 3 input: index/list pages where each version is just a link
-    with no inline content of its own — e.g. GIMP's release-notes page,
-    which lists "3.2", "3.0", "2.10", ... as links to per-version
-    subpages rather than showing any changelog text directly. Returns
-    (version, href) pairs, in document order, so the caller can follow
-    the newest one.
-    """
+    """Fallback: index pages that just link out to each version's own page."""
     hrefs = re.findall(r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', html_text,
                        re.DOTALL | re.IGNORECASE)
     candidates = []
@@ -1737,20 +1769,7 @@ def _has_meaningful_entry(versions: list[dict]) -> bool:
 
 
 def _generic_release_page_scraper(url: str, pkg_name: str) -> Optional[dict]:
-    """
-    Best-effort, site-agnostic scraper for arbitrary "release notes" pages.
-    Tries, in order: heading-based sections, bold/dt-based sections
-    (MediaWiki-style pages), a table-row layout, and finally — if the page
-    turns out to be a bare index of version links with no inline content —
-    following the newest-looking link one hop deep and scraping that.
-    Returns None (triggering the plain-link fallback) unless it ends up
-    with at least one genuinely descriptive version entry; a low-
-    confidence or wrong result is worse than an honest link, so the bar
-    is "found real content", not "found several entries" — a page whose
-    only release notes are for the single latest version (e.g. VS Code's
-    updates page, which redirects straight to the current release) is a
-    perfectly valid, if minimal, result.
-    """
+    """Best-effort, site-agnostic scraper for arbitrary "release notes" pages."""
     body = http_get(url, timeout=14)
     if not body:
         return None
@@ -1770,16 +1789,12 @@ def _generic_release_page_scraper(url: str, pkg_name: str) -> Optional[dict]:
         versions.sort(key=lambda v: _tag_selection_key(v.get("version", "")), reverse=True)
         return {"versions": versions[:8], "source": f"Release notes (auto-detected) — {url}"}
 
-    # Maybe this is just an index of links to per-version pages
-    # (e.g. GIMP's release-notes page) rather than a changelog itself.
+    # index of links to per-version pages
     index_links = _scrape_index_links_for_versions(clean)
     if len(index_links) < _GENERIC_MIN_ENTRIES:
         return None
 
-    # Try two candidates for "the newest": first in document order (most
-    # index/news pages list newest-first — a more robust signal than
-    # parsed-version sorting, which noisy extraction can throw off) and
-    # the highest by parsed version, if that's a different link.
+    # Try two candidates for "the newest"
     by_doc_order = index_links[0]
     by_version   = max(index_links, key=lambda t: _tag_selection_key(t[0]))
     for newest_ver, newest_href in dict.fromkeys([by_doc_order, by_version]):
@@ -1792,9 +1807,7 @@ def _generic_release_page_scraper(url: str, pkg_name: str) -> Optional[dict]:
         sub_clean = _strip_noise_blocks(sub_body)
         sub_versions = _scrape_headings_for_versions(sub_clean)
         if not _has_meaningful_entry(sub_versions):
-            # The whole subpage IS the notes for this one version — use
-            # its list items/paragraphs directly rather than requiring a
-            # version-labelled heading.
+            # The whole subpage IS the notes for this one version
             changes = _extract_generic_block_changes(sub_clean)
             if changes:
                 sub_versions = [{"version": newest_ver, "date": "", "changes": changes}]
@@ -1808,14 +1821,7 @@ def _generic_release_page_scraper(url: str, pkg_name: str) -> Optional[dict]:
 # ─── Changelog: upstream GitHub / GitLab ─────────────────────────────────────
 
 def _repo_name_plausible(pkg_name: str, repo_path: str) -> bool:
-    """
-    Sanity check before trusting a repo discovered by scanning a homepage
-    for GitHub/GitLab links: the repo's own name (last path segment) must
-    actually relate to the package name. Without this, scanning a generic
-    wiki/project page (e.g. GDM's homepage, which links to the unrelated
-    third-party "gdm-settings" tool) can silently attach the wrong
-    project's changelog to a completely different package.
-    """
+    """Sanity check before trusting a repo discovered by scanning a homepage."""
     repo_name = repo_path.rstrip("/").split("/")[-1].lower()
     pkg_lower = pkg_name.lower()
     # Normalise common separators so "gnome-shell" ~ "gnomeshell" etc. match
@@ -1823,20 +1829,13 @@ def _repo_name_plausible(pkg_name: str, repo_path: str) -> bool:
     norm_pkg  = re.sub(r'[-_.]', '', pkg_lower)
     if norm_pkg == norm_repo:
         return True
-    # Allow the package name to be a prefix/suffix of the repo (e.g. pkg
-    # "gtk4" vs repo "gtk"), but require at least 4 shared characters to
-    # avoid trivial false positives on very short names.
+    # Allow the package name to be a prefix/suffix of the repo
     if len(norm_pkg) >= 4 and (norm_repo.startswith(norm_pkg) or norm_pkg.startswith(norm_repo)):
         return True
     return False
 
 def _find_repo_link_in_page(url: str) -> Optional[tuple]:
-    """
-    Scan a homepage for the project's own source-code repository link.
-    Returns ("github", "owner/repo") or ("gitlab", "host", "owner[/subgroup]/repo"),
-    or None. Logs every candidate via _dbg for debugging.
-    Uses shorter timeout (8s) to avoid blocking on slow/redirecting homepages.
-    """
+    """Scan a homepage for the project's own source-code repository link."""
     body = http_get(url, timeout=8)
     if not body:
         _dbg(f"[homepage scan] could not fetch {url}")
@@ -1931,12 +1930,7 @@ def _find_repo_link_in_page(url: str) -> Optional[tuple]:
 
 
 def _find_repo_via_homepage(url: str, pkg_name: str = "") -> Optional[tuple]:
-    """
-    Resolve a package's source repo by following its homepage URL.
-    Returns ("github", "owner/repo") or ("gitlab", "host", "owner/repo").
-    Handles: direct GitHub/GitLab URLs, github.io pages and other generic
-    homepages that link to the real repo, and SourceForge project pages.
-    """
+    """Resolve a package's source repo by following its homepage URL."""
     if not url:
         return None
 
@@ -1998,10 +1992,7 @@ def _github_releases(repo: str, _pkg_name: str) -> Optional[dict]:
 
 
 def _is_meaningful_changelog(changes: list[str]) -> bool:
-    """
-    Detect if changelog content is actually meaningful or just boilerplate.
-    Returns False if changes are only links, generic text, or generic "see releases" messages.
-    """
+    """Detect if changelog content is actually meaningful or just boilerplate."""
     if not changes:
         return False
     # Consider a changelog meaningful only if at least one line looks descriptive
@@ -2023,27 +2014,7 @@ def _is_meaningful_changelog(changes: list[str]) -> bool:
 
 
 def _extract_version_from_tag(tag_name: str) -> str:
-    """
-    Normalise a tag name into a readable, comparison-friendly version
-    string. Handles:
-    - Simple semver: "v3.2.1" -> "3.2.1"
-    - GNOME-style: "GNOME_COLOR_MANAGER_3_11_90" -> "3.11.90"
-    - Release prefixes: "release-2.5" -> "2.5"
-    - Project/component-name-prefixed tags some repos use as their own
-      convention: "cardpeak-0.8.4" -> "0.8.4"
-
-    Without this last case, a tag like "cardpeak-0.8.4" or
-    "release-5.6.0" was stored verbatim as the "version" — which still
-    sorted/selected correctly as the newest tag, but never matched the
-    installed/pending version during the exact-match confirmation check
-    (_versions_contain_target), since "cardpeak-0.8.4" and "0.8.4" don't
-    compare as the same version even though they clearly are. Stripping
-    happens iteratively (release- prefix, then a generic word- prefix)
-    and stops as soon as the remainder looks like a clean version on its
-    own — or after a few attempts, so a genuinely messy legacy tag (e.g.
-    an old RPM-packaging-style tag with no clean version hiding inside
-    it) isn't mangled further than it already is.
-    """
+    """Normalise a tag name into a readable, comparison-friendly version."""
     t = (tag_name or "").strip()
     t = t.removeprefix("v").removeprefix("V")
 
@@ -2066,24 +2037,7 @@ def _extract_version_from_tag(tag_name: str) -> str:
 
 
 def _version_sort_key(ver: str) -> tuple:
-    """
-    Parse a version-ish string into a tuple that sorts correctly in
-    semantic-version order, e.g. "1.10.0" > "1.6.8" > "1.0" > "0.3.27".
-
-    This exists because GitLab's own tag/release ordering can't be
-    trusted at face value — mirrored repos can have all their tags
-    bulk-imported with the same "updated" timestamp, so the API's
-    default sort becomes effectively arbitrary. Every GitLab candidate
-    list is re-sorted with this key rather than trusting API order.
-
-    NOTE: used directly by _target_version_satisfied, which relies on
-    this returning a flat tuple whose *length* reflects how many
-    dot-separated segments the version has (it truncates both sides to
-    the shorter length before comparing, to tolerate packaging-added
-    suffixes like pacman's pkgver "3.0.23_2" vs upstream's "3.0.23").
-    Don't change this return shape — see _tag_selection_key below for a
-    separate, differently-purposed comparison.
-    """
+    """Parse a version-ish string into a tuple that sorts in semantic-version order."""
     t = (ver or "").strip().removeprefix("v").removeprefix("V")
     parts = re.split(r"[._-]", t)
     key: list[tuple[int, object]] = []
@@ -2101,78 +2055,28 @@ _CLEAN_VERSION_RE = re.compile(
 
 
 def _looks_like_clean_version(tag: str) -> bool:
-    """
-    True if a tag looks like a straightforward version number (optional
-    v-prefix, dot-separated digits, optionally one pre-release-style or
-    numeric-build suffix) rather than a differently-scoped or legacy tag
-    a repo may carry alongside its real releases — e.g. spice-space's
-    GitLab repo has ancient RPM-packaging-style tags like
-    "spice-server-0.4.2-10.el6" mixed in with its real "0.16.0"-style
-    releases.
-    """
+    """True if a tag looks like a straightforward version number."""
     return bool(_CLEAN_VERSION_RE.match((tag or "").strip()))
 
 
 def _tag_selection_key(ver: str) -> tuple:
-    """
-    Sort key for choosing the best (most likely genuinely newest) tag
-    among several candidates FROM THE SAME SOURCE — e.g. picking the
-    newest tag out of a repo's own tag list. NOT for comparing against
-    an external target version; use _version_sort_key /
-    _target_version_satisfied for that instead.
-
-    Prioritises clean-looking version tags over legacy/differently-
-    scoped ones. Without this, a tag like "spice-server-0.4.2-10.el6"
-    would outrank the real "0.16.0" release under plain numeric-
-    component comparison: _version_sort_key deliberately ranks any tag
-    with alphabetic segments above any purely-numeric one (so
-    pre-release suffixes like "-rc1" compare sensibly against "1.0.0"),
-    but that same rule means a tag from a completely different, older
-    naming scheme can win purely by containing letters — regardless of
-    its actual embedded numbers.
-    """
+    """Sort key for choosing the best (most likely genuinely newest) tag."""
     return (_looks_like_clean_version(ver), _version_sort_key(ver))
 
 
 def _strip_pacman_epoch_pkgrel(v: str) -> str:
-    """
-    Pacman version strings are formatted [epoch:]pkgver-pkgrel, e.g.
-    "1:1.6.8-1" for PipeWire (the "1:" is an epoch, "-1" is the pkgrel).
-    Neither is part of the upstream version number, so both must be
-    stripped before comparing against a tag/release version like
-    "1.6.8" — left in place, the epoch's ":" makes the leading token
-    non-numeric, which _version_sort_key then always ranks *below* any
-    purely-numeric upstream version. That silently broke every
-    target-version check for epoched packages: every correctly-parsed
-    candidate looked "too old" and was rejected, no matter how new it
-    actually was.
-    """
+    """Pacman version strings are formatted [epoch:]pkgver-pkgrel."""
     v = (v or "").strip()
     if ":" in v:
         v = v.split(":", 1)[1]
-    # pkgver itself cannot contain "-" per Arch packaging conventions,
-    # so the final "-" (if any remains) always separates it from pkgrel.
+    # pkgver itself cannot contain "-" per Arch packaging conventions
     if "-" in v:
         v = v.rsplit("-", 1)[0]
     return v
 
 
 def _target_version_satisfied(versions: list[dict], target_version: str) -> bool:
-    """
-    Sanity check: does the best (already sorted newest-first) version in
-    `versions` look at least as new as `target_version` — the version
-    pacman/AUR/Flatpak/Snap actually reports as installed or pending?
-    If either side can't be parsed into a meaningful key, we can't
-    validate, so return True rather than block on an odd version string.
-
-    Comparison is truncated to the shorter of the two parsed keys before
-    comparing. Without this, a packaging-added suffix with no upstream
-    equivalent — e.g. VLC's pacman pkgver "3.0.23_2" vs. the upstream
-    page's plain "3.0.23" — would parse to a *longer* key than the
-    upstream version, and Python tuple comparison then treats the
-    shorter, otherwise-identical prefix as "less than" it: a real match
-    would be wrongly flagged as a mismatch on every such package.
-    """
+    """Sanity check: is the newest known version at least as new as the target?"""
     if not versions or not target_version:
         return True
     tgt_key = _version_sort_key(_strip_pacman_epoch_pkgrel(target_version))
@@ -2186,19 +2090,7 @@ def _target_version_satisfied(versions: list[dict], target_version: str) -> bool
 
 
 def _versions_contain_target(versions: list[dict], target_version: str) -> bool:
-    """
-    Does the target version (the one pacman/AUR/Flatpak/Snap actually
-    reports as installed or pending) appear, essentially verbatim, among
-    the returned changelog entries? This is a stronger positive signal
-    than _target_version_satisfied's "the newest entry is at least as
-    new" check — a changelog's top entry can outrank the target
-    numerically (an "Unreleased" section, a future-dated heading, a
-    rolling-release testing build newer than what's actually installed)
-    without the changelog actually documenting the specific version the
-    user has. Uses the same epoch/pkgrel stripping and shared-prefix
-    truncation as _target_version_satisfied, so e.g. pacman's
-    "1:1.6.8-1" still matches an upstream "1.6.8" entry.
-    """
+    """Whether the target version shows up verbatim in the changelog entries."""
     if not versions or not target_version:
         return True   # can't judge — don't manufacture a false negative
     tgt_key = _version_sort_key(_strip_pacman_epoch_pkgrel(target_version))
@@ -2220,42 +2112,12 @@ _GIT_FIRST_HOSTS = {"invent.kde.org", "source.kde.org"}
 
 def _gitlab_releases(host: str, repo: str, _pkg_name: str,
                      target_version: str = "") -> Optional[dict]:
-    """
-    Priority (each candidate list is re-sorted by parsed semantic
-    version, newest first, and checked against `target_version` — the
-    version pacman/AUR/Flatpak/Snap actually reports as installed or
-    pending. A result is only returned immediately if its newest entry
-    looks at least as new as `target_version`; otherwise it's kept as a
-    fallback and the next method is tried).
-
-    This exists because GitLab's own ordering can't be trusted at face
-    value: on mirrored/imported repos, tags can share one bulk-import
-    "updated" timestamp, so the API's default sort is effectively
-    arbitrary — and the "does this tag have a usable message" filter
-    below can end up preferring an old tag with a nicely-written message
-    over the real latest tag, which may have none. Without this check,
-    a project like PipeWire could show a changelog for "1.0" or
-    "0.3.27" even when 1.6.8 is actually current.
-
-    1. For known bot-protected hosts, try git fallback first (API blocked).
-    2. GitLab Releases API (/releases) — formal Release objects.
-    3. Tags API (/repository/tags) with real changelog text.
-    4. A NEWS/CHANGELOG file on the repo's default branch.
-    5. Raw git tags (git ls-remote + each tag's annotation message) —
-       last resort, mainly useful for hosts that block the REST API.
-    """
+    """Try, in priority order: GitLab Releases API, Tags API, a NEWS/CHANGELOG file, then raw git tags."""
     best_stale: Optional[dict] = None        # newest entry looked older than target
     best_unconfirmed: Optional[dict] = None  # satisfies target, but exact version not literally listed
 
     def _consider(result: Optional[dict]) -> Optional[dict]:
-        """Sort a candidate result's versions newest-first. A result with
-        the exact target version confirmed present returns immediately —
-        the best possible outcome. A result that only satisfies the
-        weaker "newest entry looks at least as new" check is stashed as
-        a fallback rather than returned right away, so a later, better
-        method (e.g. an actual NEWS file) still gets a chance to produce
-        a fully-confirmed match instead of settling for the first
-        plausible-looking one."""
+        """Sort a candidate result's versions newest-first."""
         nonlocal best_stale, best_unconfirmed
         if not result or not result.get("versions"):
             return None
@@ -2263,14 +2125,7 @@ def _gitlab_releases(host: str, repo: str, _pkg_name: str,
             key=lambda v: _tag_selection_key(v.get("version", "")), reverse=True)
         if _target_version_satisfied(result["versions"], target_version):
             if target_version and not _versions_contain_target(result["versions"], target_version):
-                # Newest entry is at least as new as the target, but the
-                # exact target version isn't in the list — often fine
-                # (rolling-release testing builds, a changelog that
-                # skips versions), but also how a completely different
-                # release lineage (e.g. a project's next major version,
-                # numbered independently of the one actually installed)
-                # can look like a plausible match. Keep searching for a
-                # confirmed result before settling for this.
+                # Newest entry is at least as new as the target
                 result["_version_unconfirmed"] = True
                 _dbg(f"[gitlab] {result.get('source')}: satisfies target "
                      f"{target_version!r} but it isn't literally listed — "
@@ -2294,9 +2149,7 @@ def _gitlab_releases(host: str, repo: str, _pkg_name: str,
 
     encoded = urllib.parse.quote(repo, safe="")
 
-    # 2. Releases API — pull a wider window (20, not 6) so a real
-    # release isn't missed just because GitLab's own ordering puts it
-    # outside the first few entries.
+    # 2. Releases API
     data = http_get_json(f"https://{host}/api/v4/projects/{encoded}/releases?per_page=20")
     if data and isinstance(data, list) and data:
         versions = []
@@ -2314,8 +2167,7 @@ def _gitlab_releases(host: str, repo: str, _pkg_name: str,
             if r:
                 return r
 
-    # 3. Tags API — same treatment: pull a wider window and re-sort by
-    # parsed version rather than trusting GitLab's "updated" ordering.
+    # 3. Tags API
     tags = http_get_json(f"https://{host}/api/v4/projects/{encoded}/repository/tags?per_page=20")
     if tags and isinstance(tags, list) and tags:
         candidates = []
@@ -2327,9 +2179,7 @@ def _gitlab_releases(host: str, repo: str, _pkg_name: str,
             changes = [l.strip("- ").strip() for l in msg.splitlines()
                        if l.strip() and not l.strip().startswith("#")
                        and not _is_pgp_garbage(l)
-                       # Drop the tag's own generic "Release version X.Y.Z"
-                       # line — it repeats the version number with no
-                       # actual changelog content.
+                       # Drop the tag's generic "Release version X.Y.Z" line — no real content
                        and not re.match(r'^release\s+version\s+[\d.]+\s*$', l.strip(), re.I)]
             if changes:
                 candidates.append({
@@ -2344,8 +2194,7 @@ def _gitlab_releases(host: str, repo: str, _pkg_name: str,
             if r:
                 return r
 
-    # 4. NEWS/CHANGELOG file in the repo root (very common for GNOME
-    # and other C/Meson projects that skip GitLab Releases entirely).
+    # 4. NEWS/CHANGELOG file in the repo root
     r = _consider(_fetch_gitlab_news_file(host, repo))
     if r:
         return r
@@ -2354,10 +2203,7 @@ def _gitlab_releases(host: str, repo: str, _pkg_name: str,
     if r:
         return r
 
-    # Nothing produced a fully-confirmed match. Prefer a result that at
-    # least satisfied the "newest entry looks new enough" check over one
-    # that didn't — showing the best available result, clearly labelled,
-    # beats nothing at all.
+    # Nothing produced a fully-confirmed match
     if best_unconfirmed:
         return best_unconfirmed
     if best_stale:
@@ -2368,12 +2214,7 @@ def _gitlab_releases(host: str, repo: str, _pkg_name: str,
 
 
 def _gitlab_default_branch(host: str, repo: str) -> Optional[str]:
-    """
-    Look up the project's actual default branch via the GitLab API, so
-    NEWS/CHANGELOG lookups try the real default branch first instead of
-    only guessing common names — avoids picking up a stale file from an
-    unrelated branch that happens to be tried earlier in the guess list.
-    """
+    """Look up the project's actual default branch via the GitLab API."""
     encoded = urllib.parse.quote(repo, safe="")
     data = http_get_json(f"https://{host}/api/v4/projects/{encoded}")
     if data and isinstance(data, dict):
@@ -2384,9 +2225,7 @@ def _gitlab_default_branch(host: str, repo: str) -> Optional[str]:
 
 
 def _fetch_gitlab_news_file(host: str, repo: str) -> Optional[dict]:
-    """Try NEWS/CHANGELOG files via GitLab's raw-file endpoint, on the
-    project's real default branch only (looked up via the API; falls
-    back to "main" as a single guess if that lookup itself fails)."""
+    """Try NEWS/CHANGELOG files via GitLab's raw-file endpoint."""
     filenames = ["NEWS", "CHANGELOG", "NEWS.md", "CHANGELOG.md",
                  "CHANGES", "CHANGES.md", "HISTORY", "HISTORY.md"]
     branch = _gitlab_default_branch(host, repo) or "main"
@@ -2403,9 +2242,7 @@ def _fetch_gitlab_news_file(host: str, repo: str) -> Optional[dict]:
             result = _scrape_github_raw_changelog(body) if _looks_like_markdown_changelog(body) \
                      else _scrape_text_file(body)
             if result and result.get("versions"):
-                # Files aren't guaranteed to list entries strictly
-                # newest-first (merges/edits can leave them out of
-                # order) — re-sort by parsed version to be sure.
+                # Files aren't guaranteed to list entries newest-first — re-sort by version
                 result["versions"].sort(
                     key=lambda v: _tag_selection_key(v.get("version", "")),
                     reverse=True)
@@ -2446,8 +2283,7 @@ def _gitlab_git_fallback(host: str, repo: str, _pkg_name: str) -> Optional[dict]
     if not tags:
         return None
 
-    # Use the shared version key (also used to re-sort GitLab API results)
-    # rather than a separate local copy.
+    # Reuse the shared version-sort key instead of a separate local copy
     tags.sort(key=lambda tr: _tag_selection_key(tr[0]), reverse=True)
     tags = tags[:6]
     versions = []
@@ -2501,12 +2337,7 @@ def _gitlab_git_fallback(host: str, repo: str, _pkg_name: str) -> Optional[dict]
 
 def _upstream_changelog(url: str, pkg_name: str, version: str) -> Optional[dict]:
     name = pkg_name.lower()
-    # NOTE: mappings are checked centrally by callers via `_check_mappings_first()`.
-    # `_upstream_changelog` therefore only tries direct repo URLs and homepage
-    # discovery (no mappings duplication) and returns a link-only fallback if
-    # discovery finds a repo but no usable releases.
-    # Preserve custom parser and release-page entries so callers that invoke
-    # `_upstream_changelog` directly (tests and integrations) still work.
+    # NOTE: mappings are checked centrally via _check_mappings_first
     if name in KNOWN_CUSTOM:
         entry = KNOWN_CUSTOM[name]
         r = _scrape_custom(pkg_name, entry, version)
@@ -2538,9 +2369,7 @@ def _upstream_changelog(url: str, pkg_name: str, version: str) -> Optional[dict]
             "_link_url": page_url,
         }
 
-    # Known GitLab/GitHub mappings: return a link-only fallback here so callers
-    # invoking `_upstream_changelog` directly still get a result without
-    # duplicating release scraping (scraping is handled by `_check_mappings_first`).
+    # Known GitLab/GitHub mappings: return a link-only fallback for direct callers
     if name in KNOWN_GITLAB_REPOS:
         host, repo = KNOWN_GITLAB_REPOS[name]
         url = f"https://{host}/{repo}/-/releases"
@@ -2569,7 +2398,7 @@ def _upstream_changelog(url: str, pkg_name: str, version: str) -> Optional[dict]
     if gh:
         r = _github_releases(gh.group(1).rstrip("/").removesuffix(".git"), pkg_name)
         if r and r.get("versions"): return r
-    # 5. Direct GitLab URL
+    # 2. Direct GitLab URL
     gl = re.search(r"(gitlab\.[^/\s]+)/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", url)
     if gl:
         r = _gitlab_releases(gl.group(1), gl.group(2).removesuffix(".git"), pkg_name, version)
@@ -2599,19 +2428,7 @@ def _upstream_changelog(url: str, pkg_name: str, version: str) -> Optional[dict]
 # ─── Per-source changelog functions ──────────────────────────────────────────
 
 def _check_mappings_first(pkg: Package) -> Optional[dict]:
-    """
-    Always check every mapping type BEFORE any other source, in this
-    order: github -> gitlab -> custom (mantisbt/text_file/github_raw/
-    mozilla/filezilla) -> release_pages.
-
-    For "release_pages" entries, scraping arbitrary third-party sites
-    proved too unreliable across different HTML structures — instead we
-    show a direct, clickable link to the official changelog page. This is
-    simple and always correct, even if it requires one extra click.
-
-    For "custom" entries, the parser is still attempted since these are
-    simpler, well-defined formats.
-    """
+    """Always check every mapping type BEFORE any other source."""
     name = pkg.name.lower()
 
     target_version = pkg.new_version or pkg.version
@@ -2646,38 +2463,28 @@ def _check_mappings_first(pkg: Package) -> Optional[dict]:
             "_link_url": url,
         }
 
-    # Custom parser (mantisbt, text_file, github_raw, …)
+    # Custom parser (text_file, github_raw, mozilla, filezilla, …)
     if name in KNOWN_CUSTOM:
         entry = KNOWN_CUSTOM[name]
         url   = entry.get("url", "")
         r     = _scrape_custom(pkg.name, entry, target_version)
-        # Unlike the gitlab parser branch (which validates internally via
-        # _gitlab_releases), the other custom parsers (text_file,
-        # github_raw, mozilla, filezilla) had no target-version check at
-        # all — a wrong/unrelated page match would be shown unvalidated.
+        # version check
         if r and r.get("versions") and _target_version_satisfied(r["versions"], target_version):
             if target_version and not _versions_contain_target(r["versions"], target_version):
                 r["_version_unconfirmed"] = True
             return r
-        # Mapping exists but scraping failed, or didn't pass the version
-        # check — return URL fallback, not the unvalidated result.
+        # Mapping exists but scraping failed or failed the version check
         return {
             "versions": [{"version": pkg.version, "date": "",
                           "changes": [f"See {url} for details."]}],
             "source": f"Custom ({entry.get('parser', '')}) — {url}",
         }
 
-    # Dedicated release page — try the generic heuristic scraper first;
-    # only fall back to a plain link if it isn't confident enough to trust.
+    # Dedicated release page: try the generic scraper before falling back to a link
     if name in KNOWN_RELEASE_PAGES:
         url = KNOWN_RELEASE_PAGES[name]
         r = _generic_release_page_scraper(url, pkg.name)
-        # Unlike the GitLab resolver, there's no further fallback method
-        # to try here — so a version mismatch means we likely scraped the
-        # wrong thing entirely (a different app's blog post, an old news
-        # item, etc). Showing that with a warning label wasn't enough in
-        # practice: wrong content is worse than an honest link, so this
-        # discards the result and falls through to the plain link instead.
+        # No further fallback method
         if r and r.get("versions") and _target_version_satisfied(r["versions"], target_version):
             if target_version and not _versions_contain_target(r["versions"], target_version):
                 r["_version_unconfirmed"] = True
@@ -2751,20 +2558,11 @@ def fetch_changelog_pacman(pkg: Package) -> dict:
         return r
     _dbg("[2] local AppStream: no usable file")
 
-    # Steps 4/5 (known GitLab/GitHub mapping) are skipped here: this
-    # point is only reached when _check_mappings_first (step 1) already
-    # returned nothing, which — by construction — means the package
-    # name isn't in KNOWN_GITLAB_REPOS or KNOWN_GITHUB_REPOS either (that
-    # function checks both exhaustively and always returns a result,
-    # real or link-fallback, whenever either matches). Re-checking them
-    # here could never do anything.
+    # Steps 4/5 (known GitLab/GitHub mapping) are skipped here
     name = pkg.name.lower()
     target_version = pkg.new_version or pkg.version
 
-    # 3. Direct GitHub/GitLab URL — pkg.url is already loaded (read from
-    # the local pacman database at package-load time, same URL shown in
-    # the Info tab); pacman -Si is only queried as a fallback on the rare
-    # chance it's genuinely missing, not as a matter of course.
+    # 3. Direct GitHub/GitLab URL
     if not pkg.url:
         out, _, _ = run(["pacman", "-Si", pkg.name])
         for line in out.splitlines():
@@ -2794,8 +2592,7 @@ def fetch_changelog_pacman(pkg: Package) -> dict:
     else:
         _dbg("[3] no package URL to check")
 
-    # 4. Homepage scraping for an indirect GitHub/GitLab link (e.g.
-    #    apps.gnome.org/Calendar, which links out to gitlab.gnome.org).
+    # 4. Homepage scraping for an indirect GitHub/GitLab link
     fallback_link = None
     if pkg.url:
         found = _find_repo_via_homepage(pkg.url, pkg.name)
@@ -2829,12 +2626,7 @@ def fetch_changelog_pacman(pkg: Package) -> dict:
             "_link_url": fallback_link,
         }
 
-    # Nothing found. Unlike AUR (which has its own PKGBUILD history via
-    # AUR's cgit log as a last resort), pacman packages don't get an
-    # "Arch packaging GitLab" fallback here — that repo only ever
-    # reflects packaging changes (version bumps, rebuilds), not the
-    # actual upstream changelog, and wasn't judged useful enough to be
-    # worth the extra network round-trip for official-repo packages.
+    # Nothing found: no PKGBUILD-history fallback for pacman-repo packages
     return {"versions": [{"version": pkg.version, "date": "",
                           "changes": ["Changelog not found."]}],
             "source": "unavailable",
@@ -2856,16 +2648,11 @@ def fetch_changelog_aur(pkg: Package) -> dict:
         return r
     _dbg("[2] local AppStream: no usable file")
 
-    # Step 4 (known GitLab/GitHub mapping) is skipped here: this point
-    # is only reached when _check_mappings_first (step 1) already
-    # returned nothing, which — by construction — means the package
-    # name isn't in KNOWN_GITLAB_REPOS or KNOWN_GITHUB_REPOS either.
+    # Step 4 (known GitLab/GitHub mapping) is skipped here
     name = pkg.name.lower()
     target_version = pkg.new_version or pkg.version
 
-    # 3. Direct GitHub/GitLab URL — pkg.url is already loaded (fetched at
-    # package-load time via AUR RPC, same URL shown in the Info tab); a
-    # fresh RPC call is only made as a fallback if it's genuinely missing.
+    # 3. Direct GitHub/GitLab URL
     if not pkg.url:
         data = http_get_json(
             f"https://aur.archlinux.org/rpc/v5/info/{urllib.parse.quote(pkg.name)}")
@@ -2892,11 +2679,7 @@ def fetch_changelog_aur(pkg: Package) -> dict:
     else:
         _dbg("[3] no package URL to check")
 
-    # 4. Homepage scraping (GitHub or GitLab) — try this BEFORE the AUR
-    # cgit fallback below. AUR cgit only ever shows PKGBUILD packaging
-    # commits, never the upstream project's real changelog, so it should
-    # be a last resort rather than something that pre-empts finding the
-    # real upstream source via the package's homepage.
+    # 4. Homepage scraping (GitHub or GitLab)
     fallback_link = None
     if pkg.url:
         found = _find_repo_via_homepage(pkg.url, pkg.name)
@@ -3035,19 +2818,25 @@ def fetch_changelog_snap(pkg: Package) -> dict:
     if r:
         return r
 
-    versions = []
-    headers  = {"User-Agent": "Pakchan/2.0",
+    # The Snap Store API has no changelog/release-notes field at all
+    versions  = []
+    snap_info: dict = {}
+    store_url = None
+    headers   = {"User-Agent": "Pakchan/2.0",
                  "Snap-Device-Series": "16",
                  "Snap-Device-Architecture": "amd64"}
     try:
         req = urllib.request.Request(
             f"https://api.snapcraft.io/v2/snaps/info/{urllib.parse.quote(pkg.name)}",
             headers=headers)
-        with urllib.request.urlopen(req, timeout=14) as r:
-            data = json.loads(r.read())
+        with urllib.request.urlopen(req, timeout=14) as resp:
+            data = json.loads(resp.read())
     except Exception:
         data = None
     if data and isinstance(data, dict):
+        # Check both possible nesting locations for per-snap metadata
+        snap_info = data.get("snap") if isinstance(data.get("snap"), dict) else {}
+        store_url = data.get("store-url") or snap_info.get("store-url")
         seen_ver: set[str] = set()
         for entry in (data.get("channel-map") or []):
             if not isinstance(entry, dict): continue
@@ -3057,25 +2846,48 @@ def fetch_changelog_snap(pkg: Package) -> dict:
             if not ver or ver in seen_ver: continue
             seen_ver.add(ver)
             versions.append({"version": f"{ver} (rev {rev})" if rev else ver,
-                             "date": date,
-                             "changes": ["See Snap Store for detailed release notes."]})
+                              "date": date, "changes": []})
             if len(versions) >= 4: break
+    store_url = store_url or f"https://snapcraft.io/{pkg.name}"
+
+    # Candidate upstream URL
+    links = {}
+    if data and isinstance(data, dict):
+        links = snap_info.get("links") or data.get("links") or {}
+    candidates = []
+    for key in ("source-code", "issues", "website"):
+        for u in (links.get(key) or []):
+            if u and u not in candidates:
+                candidates.append(u)
     if not pkg.url:
+        # Fall back to `snap info`'s local website line if the API gave nothing
         out, _, rc = run(["snap", "info", pkg.name])
         if rc == 0:
             for line in out.splitlines():
                 if line.startswith("website:"):
                     pkg.url = line.split(":", 1)[1].strip()
                     break
-    if pkg.url:
-        r = _upstream_changelog(pkg.url, pkg.name, pkg.version)
-        if r and r.get("versions"): return r
+    if pkg.url and pkg.url not in candidates:
+        candidates.append(pkg.url)
+
+    best_link_only = None
+    for url in candidates:
+        r = _upstream_changelog(url, pkg.name, pkg.version)
+        if r and r.get("versions"):
+            if not r.get("_link_only"):
+                return r
+            elif best_link_only is None:
+                best_link_only = r
+
+    # No real changelog found anywhere
+    fallback_url = (best_link_only.get("_link_url") if best_link_only
+                    else (candidates[0] if candidates else store_url))
     if not versions:
-        versions = [{"version": pkg.version, "date": "",
-                     "changes": ["Changelog not available via Snap Store API."]}]
-        return {"versions": versions, "source": "Snap Store",
-                "_manual_check_url": pkg.url or None}
-    return {"versions": versions, "source": "Snap Store"}
+        versions = [{"version": pkg.version, "date": "", "changes": []}]
+    for v in versions:
+        v["changes"] = ["Snap Store doesn't provide release notes for this package."]
+    return {"versions": versions, "source": "Snap Store",
+            "_manual_check_url": fallback_url}
 
 
 def fetch_changelog(pkg: Package) -> dict:
@@ -3116,15 +2928,7 @@ def fetch_changelog(pkg: Package) -> dict:
 # ─── GTK Application ──────────────────────────────────────────────────────────
 
 def _resolve_source_url(changelog: dict) -> Optional[str]:
-    """
-    Best-effort extraction of a real URL for the "Source:" line, so it can
-    be shown as a clickable link instead of plain text. Prefers an explicit
-    `_link_url` (already set on link-only results), then a full URL
-    embedded directly in the `source` text, then reconstructs one for
-    sources that only name a repo path (e.g. "GitHub Releases — owner/repo").
-    Returns None if nothing usable can be found — caller falls back to a
-    plain (non-clickable) label in that case.
-    """
+    """Best-effort extraction of a real URL for the "Source:" line."""
     if changelog.get("_link_url"):
         return changelog["_link_url"]
     source = changelog.get("source", "") or ""
@@ -3142,10 +2946,28 @@ def _resolve_source_url(changelog: dict) -> Optional[str]:
 
 SORT_OPTIONS = ["Relevance", "A → Z", "Z → A", "Size ↓", "Size ↑", "Updates first"]
 
+# Curated list of well-known apps to fill the "All" tab
+POPULAR_PACMAN_NAMES = [
+    "firefox", "thunderbird", "libreoffice-fresh", "gimp", "inkscape",
+    "blender", "vlc", "mpv", "obs-studio", "kdenlive", "audacity",
+    "krita", "shotcut", "handbrake", "gnome-boxes", "virtualbox", "wine",
+    "htop", "neofetch", "keepassxc", "transmission-gtk", "qbittorrent",
+    "filezilla", "gparted", "timeshift", "bleachbit", "steam", "lutris",
+    "gedit", "kate", "geany", "flameshot", "peek", "deluge", "remmina",
+    "digikam", "shotwell", "darktable", "rawtherapee", "musescore",
+    "godot", "syncthing", "nextcloud-client",
+]
+POPULAR_AUR_NAMES = [
+    "visual-studio-code-bin", "sublime-text-4", "discord", "spotify",
+    "google-chrome", "slack-desktop", "zoom", "postman-bin", "dbeaver",
+    "brave-bin", "opera", "insomnia-bin", "android-studio", "dropbox",
+    "onlyoffice-bin", "bitwarden",
+]
+
 
 class PakchanApp(Adw.Application):
     def __init__(self):
-        super().__init__(application_id="io.github.dodog.Pakchan")
+        super().__init__(application_id="sk.mayday.pakchan")
         self.connect("activate", self.on_activate)
 
     def on_activate(self, app):
@@ -3162,9 +2984,13 @@ class PakchanWindow(Adw.ApplicationWindow):
         self.filtered:      list[Package] = []
         self.selected_pkg:  Optional[Package] = None
         self.current_tab    = "changelog"
-        self.current_filter = "all"
+        self.current_filter = "installed"
         self.current_sort   = SORT_OPTIONS[0]
         self._sync_ok       = True
+        # Pacman-repo package browsing/search-to-install support
+        self.pacman_sync_full:     dict[str, dict]  = {}
+        self._available_cache:     dict[str, Package] = {}
+        self.search_extra_results: list[Package]    = []
 
         self._build_ui()
         self._load_packages()
@@ -3188,6 +3014,9 @@ class PakchanWindow(Adw.ApplicationWindow):
         .update-panel  {background:alpha(@foreground_color,0.03);
                         border-top:1px solid alpha(@foreground_color,0.12);}
         .update-log    {font-family:monospace;font-size:11px;padding:6px 10px;}
+        .action-install{color:@success_color;}
+        .action-update {color:@accent_color;}
+        .action-remove {color:@error_color;}
         """
         p.load_from_bytes(GLib.Bytes.new(css))
         Gtk.StyleContext.add_provider_for_display(
@@ -3199,7 +3028,10 @@ class PakchanWindow(Adw.ApplicationWindow):
         self._css()
         self.icon_theme = Gtk.IconTheme.get_for_display(Gdk.Display.get_default())
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self.set_content(root)
+        # Wraps the window so toast notifications can float over anything on screen
+        self.toast_overlay = Adw.ToastOverlay()
+        self.toast_overlay.set_child(root)
+        self.set_content(self.toast_overlay)
 
         # Header bar
         hb = Adw.HeaderBar()
@@ -3209,12 +3041,6 @@ class PakchanWindow(Adw.ApplicationWindow):
         ref.set_tooltip_text("Refresh packages")
         ref.connect("clicked", lambda _: self._load_packages())
         hb.pack_start(ref)
-
-        self.apply_btn = Gtk.Button(label="Apply (0)")
-        self.apply_btn.add_css_class("suggested-action")
-        self.apply_btn.set_sensitive(False)
-        self.apply_btn.connect("clicked", self._apply_updates)
-        hb.pack_end(self.apply_btn)
 
         # ── Hamburger menu ────────────────────────────────────────────────────
         menu_btn = Gtk.MenuButton()
@@ -3256,21 +3082,22 @@ class PakchanWindow(Adw.ApplicationWindow):
         self.paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         self.paned.set_vexpand(True)
 
-        left = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        left.append(self._build_sidebar())
-        left.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
+        left = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        sidebar = self._build_sidebar()
+        left.set_start_child(sidebar)
+        left.set_resize_start_child(False)   # categories stay compact by default; drag to resize
+        left.set_shrink_start_child(False)   # can't be dragged smaller than the sidebar's own min width
         pkg_panel = self._build_pkg_panel()
         pkg_panel.set_hexpand(True)
-        left.append(pkg_panel)
-        # Reasonable floor for the sidebar+list side so the divider can't
-        # squeeze it down to almost nothing before shrink is disabled below.
+        left.set_end_child(pkg_panel)
+        left.set_resize_end_child(True)      # extra window width goes to the package list, not the sidebar
+        left.set_shrink_end_child(False)
+        left.set_position(162)
+        # Minimum width so the outer divider can't squeeze this whole side to nothing
         left.set_size_request(400, -1)
         self.paned.set_start_child(left)
         self.paned.set_resize_start_child(True)
-        # By default Gtk.Paned allows shrinking either side all the way to
-        # 0 regardless of the child's requested minimum size — that's what
-        # let the divider hide a whole column when dragged to an edge.
-        # Disabling shrink makes each side's natural minimum a hard floor.
+        # Disable Gtk.Paned's default allow-shrink so the divider can't hide a column
         self.paned.set_shrink_start_child(False)
         self.paned.set_end_child(self._build_detail_panel())
         self.paned.set_resize_end_child(False)
@@ -3283,8 +3110,7 @@ class PakchanWindow(Adw.ApplicationWindow):
         self.stack.add_named(self.paned,       "main")
         root.append(self.stack)
 
-        # Integrated update panel — slides up in place of opening an
-        # external terminal window. Hidden until an update is applied.
+        # Integrated update panel
         self.update_revealer = Gtk.Revealer()
         self.update_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_UP)
         self.update_revealer.set_reveal_child(False)
@@ -3299,11 +3125,7 @@ class PakchanWindow(Adw.ApplicationWindow):
         self.footer.set_margin_bottom(5)
         root.append(self.footer)
 
-        # Global shortcuts: Ctrl+F focuses search (selecting existing text,
-        # matching browser-style "type to replace" behavior); Escape clears
-        # search if there's anything typed, otherwise returns focus to the
-        # package list. Attached to the window so it works regardless of
-        # which widget currently has focus.
+        # Global shortcuts: Ctrl+F focuses search, Escape clears it or the focus
         key_controller = Gtk.EventControllerKey()
         key_controller.connect("key-pressed", self._on_window_key)
         self.add_controller(key_controller)
@@ -3332,19 +3154,20 @@ class PakchanWindow(Adw.ApplicationWindow):
 
         self._filter_btns: dict[str, Gtk.Button] = {}
         for key, label, icon in [
-            ("all",     "All",     "view-app-grid-symbolic"),
-            ("pacman",  "Pacman",  "system-software-update-symbolic"),
-            ("aur",     "AUR",     "applications-development-symbolic"),
-            ("flatpak", "Flatpak", "application-x-executable-symbolic"),
-            ("snap",    "Snap",    "package-x-generic-symbolic"),
-            ("updates", "Updates", "software-update-available-symbolic"),
+            ("all",       "All",       "view-app-grid-symbolic"),
+            ("installed", "Installed", "computer-symbolic"),
+            ("pacman",    "Pacman",    "system-software-update-symbolic"),
+            ("aur",       "AUR",       "applications-development-symbolic"),
+            ("flatpak",   "Flatpak",   "application-x-executable-symbolic"),
+            ("snap",      "Snap",      "package-x-generic-symbolic"),
+            ("updates",   "Updates",   "software-update-available-symbolic"),
         ]:
             btn = self._mkbtn(label, icon)
             btn.connect("clicked", self._on_filter, key)
             self._filter_btns[key] = btn
             sb.append(btn)
 
-        self.current_filter = "all"
+        self.current_filter = "installed"
         self._hl_sidebar()
         return sb
 
@@ -3387,9 +3210,11 @@ class PakchanWindow(Adw.ApplicationWindow):
         tb.set_margin_top(8);    tb.set_margin_bottom(8)
 
         self.search = Gtk.Entry()
-        self.search.set_placeholder_text("Search… (Enter)")
+        self.search.set_placeholder_text("Search…")
         self.search.set_hexpand(True)
         self.search.connect("activate", lambda _: self._do_search())
+        self.search.connect("changed", self._on_search_changed)
+        self.search.connect("icon-press", self._on_search_icon_press)
         tb.append(self.search)
 
         sb = Gtk.Button(icon_name="system-search-symbolic")
@@ -3409,12 +3234,13 @@ class PakchanWindow(Adw.ApplicationWindow):
         self.sel_all.set_visible(False)
         tb.append(self.sel_all)
 
-        # Fix #17: "Update all" button
-        self.upd_all_btn = Gtk.Button(label="Update all")
-        self.upd_all_btn.add_css_class("suggested-action")
-        self.upd_all_btn.connect("clicked", self._on_update_all)
-        self.upd_all_btn.set_visible(False)
-        tb.append(self.upd_all_btn)
+        # Update button
+        self.apply_btn = Gtk.Button(label="Update (0)")
+        self.apply_btn.add_css_class("suggested-action")
+        self.apply_btn.set_sensitive(False)
+        self.apply_btn.connect("clicked", self._apply_updates)
+        # Apply button stays always visible now that any checkbox can mean removal
+        tb.append(self.apply_btn)
 
         box.append(tb)
         box.append(Gtk.Separator())
@@ -3426,7 +3252,7 @@ class PakchanWindow(Adw.ApplicationWindow):
         self.listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
         self.listbox.add_css_class("navigation-sidebar")
         self.listbox.connect("row-selected", self._on_row_selected)
-        # Fix #14: keyboard navigation
+        # Keyboard navigation
         kc = Gtk.EventControllerKey()
         kc.connect("key-pressed", self._on_list_key)
         self.listbox.add_controller(kc)
@@ -3518,18 +3344,10 @@ class PakchanWindow(Adw.ApplicationWindow):
     }
 
     def _icon_widget_for(self, pkg: Package) -> Gtk.Image:
-        """
-        Real app icon (PAMAC-style) when one can be resolved from the
-        system icon theme, otherwise a generic per-source placeholder —
-        never a broken/blank image. Source of the icon name:
-          - pacman/AUR: the Icon= key read from the package's installed
-            .desktop file (see _desktop_entries_info).
-          - Flatpak: the app ID itself (Flatpak exports icons under it).
-          - Snap: the snap name, as a best-effort guess.
-        """
+        """Real app icon (PAMAC-style) when one can be resolved."""
         img = Gtk.Image()
         img.set_pixel_size(32)
-        name = pkg.icon_name
+        name = pkg.icon_name or pkg.name
         if name and self.icon_theme.has_icon(name):
             img.set_from_icon_name(name)
         else:
@@ -3543,11 +3361,32 @@ class PakchanWindow(Adw.ApplicationWindow):
         hb.set_margin_top(5);   hb.set_margin_bottom(5)
 
         cb = Gtk.CheckButton()
-        cb.set_active(pkg.checked)
-        cb.set_sensitive(pkg.has_update)
-        cb.set_visible(self.current_filter == "updates")
+        # Re-derive checkbox state from the current filter, don't trust stale flags
+        if not pkg.installed:
+            cb.set_active(pkg.checked)
+        elif self.current_filter == "updates":
+            cb.set_active(pkg.checked and not pkg.marked_remove)
+        else:
+            cb.set_active(pkg.checked and pkg.marked_remove)
+        # Checkbox meaning changes with context
+        if not pkg.installed:
+            cb.set_sensitive(True)
+            cb.set_tooltip_text("Select to install")
+        elif self.current_filter == "updates":
+            cb.set_sensitive(pkg.has_update)
+            cb.set_tooltip_text("Select to update" if pkg.has_update else "")
+        else:
+            cb.set_sensitive(True)
+            cb.set_tooltip_text("Select to uninstall")
         cb.connect("toggled", self._on_pkg_check, pkg)
         hb.append(cb)
+
+        # Immediate visual feedback for what the checkbox will do
+        action_icon = Gtk.Image()
+        action_icon.set_pixel_size(16)
+        self._refresh_action_icon(action_icon, pkg)
+        hb.append(action_icon)
+        cb.connect("toggled", self._on_action_icon_refresh, pkg, action_icon)
 
         hb.append(self._icon_widget_for(pkg))
 
@@ -3555,7 +3394,7 @@ class PakchanWindow(Adw.ApplicationWindow):
         nb.set_hexpand(True)
 
         top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        nl  = Gtk.Label(label=pkg.name)
+        nl  = Gtk.Label(label=pkg.display_name or pkg.name)
         nl.set_xalign(0); nl.set_ellipsize(Pango.EllipsizeMode.END)
         nl.add_css_class("heading"); top.append(nl)
         badge = Gtk.Label(label=pkg.repo)
@@ -3563,15 +3402,22 @@ class PakchanWindow(Adw.ApplicationWindow):
         if pkg.is_dep:
             dep = Gtk.Label(label="dep"); dep.add_css_class("dep-tag")
             top.append(dep)
+        if not pkg.installed:
+            tag = Gtk.Label(label="not installed"); tag.add_css_class("dep-tag")
+            top.append(tag)
         nb.append(top)
 
         vb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        vl = Gtk.Label(label=pkg.version)
-        vl.add_css_class("dim-label"); vl.set_xalign(0); vb.append(vl)
-        if pkg.has_update:
-            vb.append(Gtk.Label(label="→"))
-            nl2 = Gtk.Label(label=pkg.new_version)
-            nl2.add_css_class("has-update"); vb.append(nl2)
+        if pkg.installed:
+            vl = Gtk.Label(label=pkg.version)
+            vl.add_css_class("dim-label"); vl.set_xalign(0); vb.append(vl)
+            if pkg.has_update:
+                vb.append(Gtk.Label(label="→"))
+                nl2 = Gtk.Label(label=pkg.new_version)
+                nl2.add_css_class("has-update"); vb.append(nl2)
+        else:
+            vl = Gtk.Label(label=f"Available: {pkg.new_version}")
+            vl.add_css_class("dim-label"); vl.set_xalign(0); vb.append(vl)
         nb.append(vb)
         hb.append(nb)
 
@@ -3590,9 +3436,7 @@ class PakchanWindow(Adw.ApplicationWindow):
         return row
 
     def _show_row_context_menu(self, pkg: Package, row: Gtk.ListBoxRow, x: float, y: float):
-        """Right-click menu: copy name, open homepage, force-refresh the
-        changelog — actions that otherwise require opening the detail
-        panel first."""
+        """Right-click menu: copy name, open homepage, force-refresh changelog."""
         self.listbox.select_row(row)
 
         popover = Gtk.Popover()
@@ -3645,19 +3489,21 @@ class PakchanWindow(Adw.ApplicationWindow):
     # ── Sort ──────────────────────────────────────────────────────────────────
 
     def _relevance_score(self, p: Package) -> tuple:
-        """
-        Lower tuple sorts first. Mirrors PAMAC's "user-facing first"
-        heuristic:
-          1. Explicit installs before dependency-only packages.
-          2. Packages with a desktop launcher (GUI apps you'd actually
-             open) before CLI tools / libraries with no .desktop file.
-          3. Flatpak/AUR/Snap apps (almost always explicitly chosen by
-             the user) rank with explicit pacman installs, not below them.
-          4. Alphabetical as the final tiebreaker.
-        """
+        """Relevance sort key: query match quality first, then PAMAC-style defaults."""
+        q = self.search.get_text().lower().strip()
+        installed_rank = 0 if p.installed else 1
+        if q:
+            name = p.name.lower()
+            if name == q:            query_rank = 0
+            elif name.startswith(q): query_rank = 1
+            elif q in name:          query_rank = 2
+            else:                    query_rank = 3   # description-only match
+            return (query_rank, installed_rank, p.name.lower())
+        if self.current_filter == "all":
+            installed_rank = 1 if p.installed else 0
         explicit_rank = 0 if not p.is_dep else 1
         gui_rank      = 0 if p.has_desktop_entry else 1
-        return (explicit_rank, gui_rank, p.name.lower())
+        return (installed_rank, explicit_rank, gui_rank, p.name.lower())
 
     def _sorted(self, pool: list[Package]) -> list[Package]:
         s = self.current_sort
@@ -3687,12 +3533,24 @@ class PakchanWindow(Adw.ApplicationWindow):
         if q:
             pool = [p for p in self.all_packages
                     if q in p.name.lower() or q in p.description.lower()]
+            self.search_extra_results = (self._find_installable_matches(q) +
+                                          self._find_installable_flatpak_matches(q) +
+                                          self._find_installable_aur_matches(q))
+            pool = pool + self.search_extra_results
         elif flt == "updates":
             pool = [p for p in self.all_packages if p.has_update]
-        elif flt == "all":
+            self.search_extra_results = []
+        elif flt == "installed":
             pool = list(self.all_packages)
+            self.search_extra_results = []
+        elif flt == "all":
+            # "All" tab: installed packages plus most popular apps
+            extra = self._popular_candidates()
+            pool = list(self.all_packages) + extra
+            self.search_extra_results = extra
         else:
             pool = [p for p in self.all_packages if p.repo == flt]
+            self.search_extra_results = []
 
         pool = self._sorted(pool)
         self.filtered = pool
@@ -3708,7 +3566,7 @@ class PakchanWindow(Adw.ApplicationWindow):
                 self.empty_state.set_title("No packages here")
                 self.empty_state.set_description("Nothing in this category right now.")
 
-        # Fix issue 1: progressive rendering in chunks so UI stays responsive
+        # Progressive rendering in chunks so UI stays responsive
         CHUNK = 80
         gen   = self._pop_generation
 
@@ -3724,35 +3582,228 @@ class PakchanWindow(Adw.ApplicationWindow):
 
         GLib.idle_add(_add_chunk, 0)
 
-        # Fix #15/#17: show/hide controls based on filter
+        # 'Select all' stays Updates-only; Apply button is always visible
         is_upd = (flt == "updates")
         self.sel_all.set_visible(is_upd)
-        self.upd_all_btn.set_visible(is_upd)
-        self.upd_all_btn.set_sensitive(any(p.has_update for p in pool))
 
         self._update_counts_label()
         self._update_footer()
 
-        total = sum(1 for p in self.all_packages if p.checked)
+        total = self._checked_count()
         self.apply_btn.set_sensitive(total > 0)
-        self.apply_btn.set_label(f"Apply ({total})")
+        self.apply_btn.set_label(self._apply_btn_label())
+
+    def _selectable_pool(self) -> list:
+        """All packages that can currently have `.checked` set."""
+        return self.all_packages + self.search_extra_results
+
+    def _checked_count(self) -> int:
+        return sum(1 for p in self._selectable_pool() if p.checked)
+
+    def _apply_btn_label(self) -> str:
+        checked = [p for p in self._selectable_pool() if p.checked]
+        n = len(checked)
+        if not n:
+            return "Update (0)"
+        installs  = [p for p in checked if not p.installed]
+        removals  = [p for p in checked if p.marked_remove]
+        updates   = [p for p in checked if p.installed and not p.marked_remove]
+        kinds = sum(bool(g) for g in (installs, removals, updates))
+        if kinds > 1:
+            return f"Apply ({n})"
+        if removals:
+            return f"Uninstall ({n})"
+        if installs:
+            return f"Install ({n})"
+        return f"Update ({n})"
+
+    def _find_installable_matches(self, q: str, limit: int = 150) -> list:
+        """Search the pacman sync db."""
+        if not q or not self.pacman_sync_full:
+            return []
+        installed_names = {p.name for p in self.all_packages}
+        scored = []
+        for name, info in self.pacman_sync_full.items():
+            if name in installed_names:
+                continue
+            name_l = name.lower()
+            if name_l == q:            rank = 0
+            elif name_l.startswith(q): rank = 1
+            elif q in name_l:          rank = 2
+            elif q in info.get("desc", "").lower(): rank = 3
+            else:                      continue
+            scored.append((rank, len(name), name, info))
+        scored.sort(key=lambda t: (t[0], t[1], t[2]))
+        matches = []
+        for _, _, name, info in scored[:limit]:
+            cache_key = f"pacman:{name}"
+            pkg = self._available_cache.get(cache_key)
+            if pkg is None:
+                pkg = Package(
+                    name=name, version="", new_version=info.get("version", "?"),
+                    description=info.get("desc", ""), repo="pacman",
+                    license=info.get("license", ""), url=info.get("url", ""),
+                    depends=info.get("depends", ""), installed=False,
+                )
+                self._available_cache[cache_key] = pkg
+            matches.append(pkg)
+        return matches
+
+    def _find_installable_flatpak_matches(self, q: str, limit: int = 60) -> list:
+        if not q:
+            return []
+        installed_ids = {p.name for p in self.all_packages if p.repo == "flatpak"}
+        raw = _flatpak_search(q)
+        scored = []
+        for r in raw:
+            app_id = r["app_id"]
+            if app_id in installed_ids:
+                continue
+            name_l = r["name"].lower()
+            id_l   = app_id.lower()
+            if name_l == q or id_l == q:                rank = 0
+            elif name_l.startswith(q) or id_l.startswith(q): rank = 1
+            elif q in name_l or q in id_l:               rank = 2
+            elif q in r.get("desc", "").lower():          rank = 3
+            else:                                          rank = 4  # flatpak search already filtered — keep, just ranked last
+            scored.append((rank, len(app_id), app_id, r))
+        scored.sort(key=lambda t: (t[0], t[1], t[2]))
+        matches = []
+        for _, _, app_id, r in scored[:limit]:
+            cache_key = f"flatpak:{app_id}"
+            pkg = self._available_cache.get(cache_key)
+            if pkg is None:
+                pkg = Package(
+                    name=app_id, version="", new_version=r.get("version", "?"),
+                    description=r.get("desc", ""), repo="flatpak",
+                    installed=False, remote=r.get("remote", "flathub"),
+                    icon_name=app_id, display_name=r.get("name", ""),
+                )
+                self._available_cache[cache_key] = pkg
+            matches.append(pkg)
+        return matches
+
+    def _find_installable_aur_matches(self, q: str, limit: int = 150) -> list:
+        if not q:
+            return []
+        if not KNOWN_AUR_META:
+            print("[aur-meta] search ran but KNOWN_AUR_META is still empty "
+                  "(background fetch not done yet, or it failed — check "
+                  "earlier [aur-meta] messages above)", file=sys.stderr)
+            return []
+        installed_names = {p.name for p in self.all_packages}
+        scored = []
+        for name, info in KNOWN_AUR_META.items():
+            if name in installed_names:
+                continue
+            name_l = name.lower()
+            if name_l == q:            rank = 0
+            elif name_l.startswith(q): rank = 1
+            elif q in name_l:          rank = 2
+            elif q in info.get("desc", "").lower(): rank = 3
+            else:                      continue
+            scored.append((rank, len(name), name, info))
+        scored.sort(key=lambda t: (t[0], t[1], t[2]))
+        matches = []
+        for _, _, name, info in scored[:limit]:
+            cache_key = f"aur:{name}"
+            pkg = self._available_cache.get(cache_key)
+            if pkg is None:
+                pkg = Package(
+                    name=name, version="", new_version=info.get("version", "?"),
+                    description=info.get("desc", ""), repo="aur",
+                    license=info.get("license", ""), url=info.get("url", ""),
+                    depends=info.get("depends", ""), installed=False,
+                )
+                self._available_cache[cache_key] = pkg
+            matches.append(pkg)
+        return matches
+
+    def _popular_candidates(self) -> list:
+        """Popular not-currently-installed apps."""
+        installed_names = {p.name for p in self.all_packages}
+        out = []
+        for name in POPULAR_PACMAN_NAMES:
+            if name in installed_names:
+                continue
+            info = self.pacman_sync_full.get(name)
+            if not info:
+                continue
+            cache_key = f"pacman:{name}"
+            pkg = self._available_cache.get(cache_key)
+            if pkg is None:
+                pkg = Package(
+                    name=name, version="", new_version=info.get("version", "?"),
+                    description=info.get("desc", ""), repo="pacman",
+                    license=info.get("license", ""), url=info.get("url", ""),
+                    depends=info.get("depends", ""), installed=False,
+                )
+                self._available_cache[cache_key] = pkg
+            out.append(pkg)
+        for name in POPULAR_AUR_NAMES:
+            if name in installed_names:
+                continue
+            info = KNOWN_AUR_META.get(name)
+            if not info:
+                continue
+            cache_key = f"aur:{name}"
+            pkg = self._available_cache.get(cache_key)
+            if pkg is None:
+                pkg = Package(
+                    name=name, version="", new_version=info.get("version", "?"),
+                    description=info.get("desc", ""), repo="aur",
+                    license=info.get("license", ""), url=info.get("url", ""),
+                    depends=info.get("depends", ""), installed=False,
+                )
+                self._available_cache[cache_key] = pkg
+            out.append(pkg)
+        return out
+
+    def _pkg_conflicts(self, pkg: Package) -> set:
+        """Bare package names this package declares in Conflicts=."""
+        info = None
+        if pkg.repo == "pacman":
+            info = self.pacman_sync_full.get(pkg.name)
+        elif pkg.repo == "aur":
+            info = KNOWN_AUR_META.get(pkg.name)
+        if not info:
+            return set()
+        raw = info.get("conflicts", "")
+        return {_VER_OP_RE.sub("", c).strip() for c in raw.split(",") if c.strip()}
+
+    def _classify_batch_conflicts(self, sel: list):
+        """Checks each package about to be installed against its declared conflicts."""
+        installs = [p for p in sel if not p.installed]
+        removals = {p.name for p in sel if p.marked_remove}
+        installed_names = {p.name for p in self.all_packages if p.installed}
+        resolved, unresolved = [], []
+        for p in installs:
+            for c in self._pkg_conflicts(p):
+                if c == p.name:
+                    continue   # a package can't conflict with itself
+                if c in removals:
+                    resolved.append((p, c))
+                elif c in installed_names:
+                    unresolved.append((p, c))
+        return resolved, unresolved
 
     def _update_counts_label(self):
-        """Rebuild the "N packages · N selected" label under the list.
-        Split out from _populate_list so a single checkbox toggle can
-        refresh the selected-count text without re-rendering all rows.
-        """
+        """Rebuild the "N packages · N selected" label under the list."""
         pool    = self.filtered
         flt     = self.current_filter
         q       = self.search.get_text().lower().strip()
         n       = len(pool)
-        n_upd   = sum(1 for p in pool if p.has_update)
-        checked = sum(1 for p in self.all_packages if p.checked)
+        n_upd   = sum(1 for p in pool if p.has_update and p.installed)
+        checked = self._checked_count()
         parts   = [f"{n} package{'s' if n != 1 else ''}"]
         if flt != "updates" and n_upd:
             parts.append(f"{n_upd} with updates")
-        if q:
+        if q and self.search_extra_results:
+            parts.append(f"{len(self.search_extra_results)} available to install")
+        elif q:
             parts.append("search results")
+        elif flt == "all" and self.search_extra_results:
+            parts.append(f"{len(self.search_extra_results)} popular picks")
         if checked:
             parts.append(f"{checked} selected")
         self.count_lbl.set_text(" · ".join(parts))
@@ -3765,10 +3816,15 @@ class PakchanWindow(Adw.ApplicationWindow):
         n_s   = sum(1 for p in pkgs if p.repo == "snap")
         n_upd = sum(1 for p in pkgs if p.has_update)
         flt   = self.current_filter
-        if flt == "all":
+        if flt == "installed":
             self.footer.set_text(
                 f"{len(pkgs)} packages total · {n_upd} update{'s' if n_upd!=1 else ''} available"
                 f" · Pacman {n_p}  AUR {n_a}  Flatpak {n_f}  Snap {n_s}")
+        elif flt == "all":
+            n_extra = len(self.search_extra_results)
+            self.footer.set_text(
+                f"{len(pkgs)} installed"
+                + (f" · {n_extra} popular pick{'s' if n_extra!=1 else ''} to explore" if n_extra else ""))
         elif flt == "updates":
             self.footer.set_text(
                 f"{n_upd} pending update{'s' if n_upd!=1 else ''}")
@@ -3790,11 +3846,15 @@ class PakchanWindow(Adw.ApplicationWindow):
         threading.Thread(target=self._fetch_all, daemon=True).start()
 
     def _fetch_all(self):
-        pkgs, sync_ok = get_all_packages_fast()
-        GLib.idle_add(self._on_loaded, pkgs, sync_ok)
+        pkgs, sync_full, sync_ok = get_all_packages_fast()
+        GLib.idle_add(self._on_loaded, pkgs, sync_full, sync_ok)
 
-    def _on_loaded(self, pkgs: list, sync_ok: bool):
-        self.all_packages = pkgs
+    def _on_loaded(self, pkgs: list, sync_full: dict, sync_ok: bool):
+        self.all_packages     = pkgs
+        self.pacman_sync_full = sync_full   # {name: info} for every repo package — powers search-for-installables
+        # Cached "available to install" results are now stale
+        self._available_cache = {}
+        self.search_extra_results = []
         self._sync_ok     = sync_ok
         # Fix #19
         self.sync_banner.set_revealed(not sync_ok and bool(pkgs))
@@ -3808,6 +3868,7 @@ class PakchanWindow(Adw.ApplicationWindow):
         self._populate_list()
         # Fix #1: refresh mappings in background after UI is shown
         _refresh_mappings_bg()
+        _refresh_aur_meta_bg()
         return False
 
     # ── Events ────────────────────────────────────────────────────────────────
@@ -3817,15 +3878,32 @@ class PakchanWindow(Adw.ApplicationWindow):
         self.search.set_text("")   # clear search — restores category browsing
         self._hl_sidebar()
         if key != "updates":
-            for p in self.all_packages: p.checked = False
+            # Only clear install/update selections
+            for p in self.all_packages:
+                if not p.marked_remove: p.checked = False
+            for p in self._available_cache.values():
+                if not p.marked_remove: p.checked = False
             self.sel_all.set_active(False)
         self._populate_list()
+
+    def _on_search_changed(self, entry):
+        # Only show the clear icon once there's something to clear.
+        has_text = bool(entry.get_text())
+        entry.set_icon_from_icon_name(
+            Gtk.EntryIconPosition.SECONDARY,
+            "edit-clear-symbolic" if has_text else None)
+        if has_text:
+            entry.set_icon_tooltip_text(Gtk.EntryIconPosition.SECONDARY, "Clear")
+
+    def _on_search_icon_press(self, entry, icon_pos):
+        if icon_pos == Gtk.EntryIconPosition.SECONDARY:
+            entry.set_text("")
+            self._do_search()
 
     def _do_search(self):
         q = self.search.get_text().strip()
         if q:
-            # Search crosses all sources — reset sidebar highlight to "all"
-            # but don't change current_filter so user can go back
+            # Search crosses all sources — reset sidebar highlight but not the filter
             for key, btn in self._filter_btns.items():
                 lbl = self._btn_label(btn)
                 if lbl:
@@ -3844,21 +3922,52 @@ class PakchanWindow(Adw.ApplicationWindow):
 
     def _on_select_all(self, btn):
         for p in self.filtered:
-            if p.has_update: p.checked = btn.get_active()
+            if p.has_update:
+                p.checked = btn.get_active()
+                # Select-all only lives on the Updates tab
+                p.marked_remove = False
         self._populate_list()
 
-    def _on_update_all(self, btn):
-        """Fix #17: select all updatable packages."""
-        for p in self.all_packages:
-            p.checked = p.has_update
-        self.sel_all.set_active(True)
-        self._populate_list()
+    def _checkbox_action_visual(self, pkg: Package) -> Optional[tuple]:
+        """Returns (icon_name, css_class, tooltip) describing what a checked box means."""
+        if not pkg.installed:
+            if pkg.checked:
+                return ("list-add-symbolic", "action-install", "Will be installed")
+            return None
+        if self.current_filter == "updates":
+            if pkg.checked and not pkg.marked_remove:
+                return ("software-update-available-symbolic", "action-update", "Will be updated")
+            return None
+        if pkg.checked and pkg.marked_remove:
+            return ("user-trash-symbolic", "action-remove", "Will be uninstalled")
+        return None
+
+    _ACTION_ICON_CSS_CLASSES = ("action-install", "action-update", "action-remove")
+
+    def _refresh_action_icon(self, img: Gtk.Image, pkg: Package):
+        for cls in self._ACTION_ICON_CSS_CLASSES:
+            img.remove_css_class(cls)
+        visual = self._checkbox_action_visual(pkg)
+        if visual:
+            icon_name, css_class, tooltip = visual
+            img.set_from_icon_name(icon_name)
+            img.add_css_class(css_class)
+            img.set_tooltip_text(tooltip)
+            img.set_visible(True)
+        else:
+            img.set_visible(False)
+
+    def _on_action_icon_refresh(self, cb, pkg: Package, action_icon: Gtk.Image):
+        self._refresh_action_icon(action_icon, pkg)
 
     def _on_pkg_check(self, cb, pkg: Package):
-        pkg.checked = cb.get_active()
-        total = sum(1 for p in self.all_packages if p.checked)
+        active = cb.get_active()
+        pkg.checked = active
+        # Resolve what this checkbox means at the moment it's toggled
+        pkg.marked_remove = bool(active and pkg.installed and self.current_filter != "updates")
+        total = self._checked_count()
         self.apply_btn.set_sensitive(total > 0)
-        self.apply_btn.set_label(f"Apply ({total})")
+        self.apply_btn.set_label(self._apply_btn_label())
         self._update_counts_label()
         self._update_footer()
 
@@ -3866,13 +3975,15 @@ class PakchanWindow(Adw.ApplicationWindow):
         if row is None: return
         pkg = row.pkg
         self.selected_pkg = pkg
-        self.d_name.set_markup(f"<b>{GLib.markup_escape_text(pkg.name)}</b>")
+        self.d_name.set_markup(f"<b>{GLib.markup_escape_text(pkg.display_name or pkg.name)}</b>")
         self.d_desc.set_text(pkg.description or "Loading…")
         if pkg.icon_name and self.icon_theme.has_icon(pkg.icon_name):
             self.d_icon.set_from_icon_name(pkg.icon_name)
         else:
             self.d_icon.set_from_icon_name(self._ICON_FALLBACK.get(pkg.repo, "package-x-generic-symbolic"))
-        if pkg.repo in ("flatpak", "snap") and (not pkg.description or not pkg.url):
+        if pkg.repo in ("flatpak", "snap") and (
+                not pkg.description or not pkg.url or
+                (pkg.repo == "flatpak" and not pkg.display_name)):
             threading.Thread(target=self._enrich_bg, args=(pkg,), daemon=True).start()
         self._render_detail()
 
@@ -3882,6 +3993,8 @@ class PakchanWindow(Adw.ApplicationWindow):
 
     def _enrich_done(self, pkg: Package):
         if self.selected_pkg and self.selected_pkg.name == pkg.name:
+            self.d_name.set_markup(
+                f"<b>{GLib.markup_escape_text(pkg.display_name or pkg.name)}</b>")
             self.d_desc.set_text(pkg.description or "No description available.")
             if self.current_tab == "info":
                 self._render_detail()
@@ -3893,7 +4006,7 @@ class PakchanWindow(Adw.ApplicationWindow):
             b.set_active(k == key)
         self._render_detail()
 
-    # Fix #14: keyboard arrow navigation
+    # Keyboard arrow navigation
     def _on_list_key(self, controller, keyval, keycode, state):
         UP   = Gdk.KEY_Up
         DOWN = Gdk.KEY_Down
@@ -3948,11 +4061,22 @@ class PakchanWindow(Adw.ApplicationWindow):
             hb.append(v)
         self.d_box.append(hb)
 
+    def _install_one(self, pkg: Package):
+        pkg.checked = True
+        self._confirm_and_apply([pkg])
+
     def _render_info(self, pkg: Package):
-        self._info_row("Source",    pkg.repo.upper())
-        self._info_row("Installed", pkg.version)
-        if pkg.has_update:     self._info_row("Update to",  pkg.new_version)
-        if pkg.installed_size: self._info_row("On disk",    pkg.installed_size)
+        self._info_row("Source", pkg.repo.upper())
+        # Show the raw technical identifier
+        if pkg.display_name and pkg.display_name != pkg.name:
+            label = "Application ID" if pkg.repo == "flatpak" else "Package name"
+            self._info_row(label, pkg.name)
+        if pkg.installed:
+            self._info_row("Installed", pkg.version)
+            if pkg.has_update:     self._info_row("Update to",  pkg.new_version)
+            if pkg.installed_size: self._info_row("On disk",    pkg.installed_size)
+        else:
+            self._info_row("Available", pkg.new_version)
         if pkg.license:        self._info_row("License",    pkg.license)
         if pkg.url:            self._info_row("URL",        pkg.url, is_url=True)
         if pkg.depends:        self._info_row("Depends",    pkg.depends)
@@ -3960,6 +4084,18 @@ class PakchanWindow(Adw.ApplicationWindow):
             note = Gtk.Label(label="ⓘ Installed as a dependency")
             note.add_css_class("dim-label"); note.set_xalign(0); note.set_margin_top(6)
             self.d_box.append(note)
+        if not pkg.installed:
+            btn = Gtk.Button(label="Install")
+            btn.add_css_class("suggested-action")
+            btn.set_halign(Gtk.Align.START); btn.set_margin_top(10)
+            btn.connect("clicked", lambda _: self._install_one(pkg))
+            self.d_box.append(btn)
+
+    def _make_cached_icon(self) -> Gtk.Image:
+        icon = Gtk.Image.new_from_icon_name("document-open-recent-symbolic")
+        icon.set_tooltip_text("Loaded from cache")
+        icon.add_css_class("dim-label")
+        return icon
 
     def _render_changelog(self, pkg: Package):
         if pkg.changelog is None:
@@ -3981,9 +4117,7 @@ class PakchanWindow(Adw.ApplicationWindow):
             self._append_debug_expander(pkg)
             return
 
-        # If this package only has a release_pages mapping (no scraping
-        # attempted), show a direct clickable link at the top and stop —
-        # this is the simple, always-correct fallback requested by the user.
+        # If this package only has a release_pages mapping
         if pkg.changelog.get("_link_only"):
             url = pkg.changelog.get("_link_url", "")
             escaped_url = GLib.markup_escape_text(url)
@@ -3995,19 +4129,20 @@ class PakchanWindow(Adw.ApplicationWindow):
             link_lbl.set_margin_bottom(4)
             self.d_box.append(link_lbl)
 
+            ref_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+            if pkg.changelog.get("_from_cache"):
+                ref_row.append(self._make_cached_icon())
             ref_btn = Gtk.Button(label="↻ Refresh")
             ref_btn.add_css_class("flat"); ref_btn.set_halign(Gtk.Align.START)
             ref_btn.connect("clicked", lambda _: self._force_refresh_cl(pkg))
-            self.d_box.append(ref_btn)
+            ref_row.append(ref_btn)
+            self.d_box.append(ref_row)
 
             self._append_debug_expander(pkg)
             return
 
-        # Source label + cache indicator — only the URL portion is
-        # clickable (via an inline markup link), not the whole line.
+        # Source label: URL portion is a clickable link
         src_desc = pkg.changelog.get('source', '')
-        if pkg.changelog.get("_from_cache"):
-            src_desc += "  [cached]"
         src_url = _resolve_source_url(pkg.changelog)
         src = Gtk.Label()
         src.set_xalign(0)
@@ -4018,9 +4153,7 @@ class PakchanWindow(Adw.ApplicationWindow):
             if src_url in desc_text:
                 desc_text = desc_text.replace(src_url, "").rstrip(" —-")
             else:
-                # Source text may only contain the repo path (e.g.
-                # "owner/repo"), not the full reconstructed URL — strip
-                # that instead so it isn't shown twice.
+                # Strip the repo path
                 path_part = re.sub(r'^https?://[^/]+/?', '', src_url)
                 if path_part and path_part in desc_text:
                     desc_text = desc_text.replace(path_part, "").rstrip(" —-")
@@ -4032,45 +4165,33 @@ class PakchanWindow(Adw.ApplicationWindow):
         src.add_css_class("dim-label"); src.set_margin_bottom(2)
         self.d_box.append(src)
 
-        # When automatic changelog detection genuinely found nothing, the
-        # Source line above stays "unavailable" (so it's unambiguous that
-        # detection failed) — this adds a clickable link to the package's
-        # own homepage underneath it, so the user has a manual next step
-        # instead of a dead end.
+        # adds a clickable link when automatic changelog detection found nothing
         manual_url = pkg.changelog.get("_manual_check_url")
         if manual_url:
             escaped_url = GLib.markup_escape_text(manual_url)
             manual_lbl = Gtk.Label()
             manual_lbl.set_markup(
-                f'You can check manually: <a href="{escaped_url}">{escaped_url}</a>')
+                f'Please check manually at: <a href="{escaped_url}">{escaped_url}</a>')
             manual_lbl.set_xalign(0)
             manual_lbl.set_wrap(True); manual_lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
             manual_lbl.set_hexpand(True)
             manual_lbl.add_css_class("dim-label"); manual_lbl.set_margin_bottom(2)
             self.d_box.append(manual_lbl)
 
-        # Fix #6: stale warning
+        # Stale warning
         if pkg.changelog.get("_stale"):
             stale_lbl = Gtk.Label(label="⚠ Cached data may be outdated (>7 days)")
             stale_lbl.add_css_class("stale-warn"); stale_lbl.set_xalign(0)
             self.d_box.append(stale_lbl)
 
         # Newest version found didn't match the installed/pending version
-        # (see _target_version_satisfied) — shown rather than hidden, since
-        # a wrong-but-labelled changelog is more useful than a silently
-        # misleading one.
         if pkg.changelog.get("_version_mismatch"):
             mismatch_lbl = Gtk.Label(
                 label="⚠ This may not be the changelog for the current version")
             mismatch_lbl.add_css_class("stale-warn"); mismatch_lbl.set_xalign(0)
             self.d_box.append(mismatch_lbl)
 
-        # Softer than _version_mismatch: the newest entry looked at
-        # least as new as the installed/pending version, but that exact
-        # version isn't literally listed — often fine (a rolling-release
-        # testing build ahead of what's installed, a changelog that
-        # skips versions), but worth a quiet note rather than implying
-        # an exact match was confirmed.
+        # Newest entry is new enough, but unconfirmed
         elif pkg.changelog.get("_version_unconfirmed"):
             unconfirmed_lbl = Gtk.Label(
                 label="ℹ Exact update version not listed below — "
@@ -4080,7 +4201,9 @@ class PakchanWindow(Adw.ApplicationWindow):
             unconfirmed_lbl.set_hexpand(True)
             self.d_box.append(unconfirmed_lbl)
 
-        ref_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        ref_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        if pkg.changelog.get("_from_cache"):
+            ref_row.append(self._make_cached_icon())
         ref_btn = Gtk.Button(label="↻ Refresh")
         ref_btn.add_css_class("flat"); ref_btn.set_halign(Gtk.Align.START)
         ref_btn.connect("clicked", lambda _: self._force_refresh_cl(pkg))
@@ -4116,11 +4239,7 @@ class PakchanWindow(Adw.ApplicationWindow):
         self._append_debug_expander(pkg)
 
     def _append_debug_expander(self, pkg: Package):
-        """
-        Show exactly which resolution steps were tried for this package
-        and what each one did — so changelog problems can be diagnosed
-        directly from the UI instead of guessing.
-        """
+        """Show exactly which resolution steps were tried for this package."""
         trace = pkg.changelog.get("_debug") if pkg.changelog else None
         if not trace:
             return
@@ -4161,11 +4280,14 @@ class PakchanWindow(Adw.ApplicationWindow):
             self._render_detail()
 
     def _render_files(self, pkg: Package):
-        """Fix #20: walk real Flatpak deploy directory.
-        Fix: pacman file listing now runs on a background thread —
-        `pacman -Ql` can be slow for large packages and was previously
-        run synchronously on the GTK main thread, freezing the UI.
-        """
+        """Walk the real Flatpak deploy directory; run pacman -Ql off the main thread."""
+        if not pkg.installed:
+            note = Gtk.Label(label="Not installed — nothing to list yet.")
+            note.add_css_class("dim-label"); note.set_halign(Gtk.Align.CENTER)
+            note.set_margin_top(20)
+            self.d_box.append(note)
+            return
+
         if pkg.repo == "pacman":
             sp = Gtk.Spinner(); sp.start()
             sp.set_size_request(24, 24); sp.set_halign(Gtk.Align.CENTER)
@@ -4261,8 +4383,12 @@ class PakchanWindow(Adw.ApplicationWindow):
         dlg.set_website("https://dodog.github.io/pakchan/web/")
         dlg.set_issue_url("https://github.com/dodog/pakchan/issues")
         dlg.set_license_type(Gtk.License.GPL_3_0)
-        dlg.set_developers(["Pakchan contributors"])
-        dlg.set_copyright("© 2025 Pakchan contributors")
+        dlg.set_developers([
+            "Jozef Gaal",
+            "Pakchan contributors https://github.com/dodog/pakchan/graphs/contributors",
+        ])
+        dlg.set_copyright("© 2026 Jozef Gaal")
+        dlg.add_link("Donate", "https://buymeacoffee.com/dodog")
 
         # Show package counts as extra info
         n_pkgs = len(self.all_packages)
@@ -4288,15 +4414,6 @@ class PakchanWindow(Adw.ApplicationWindow):
     # ── Apply updates ─────────────────────────────────────────────────────────
 
     # ── Integrated update panel ──────────────────────────────────────────────
-    # Replaces the old "spawn an external terminal window" approach. The
-    # update runs in a real pty (via Vte if available, otherwise a plain
-    # pty-backed fallback) inside a panel that slides up at the bottom of
-    # the window, so `sudo`/makepkg prompts still work exactly as before,
-    # but the whole thing stays inside Pakchan. When the process finishes,
-    # we simply reload the package list from disk — that's the reliable
-    # way to know what's actually installed now (rather than trying to
-    # infer it from parsed terminal output), and it also clears the
-    # checkbox/"has update" state for whatever just got updated.
 
     def _build_update_panel(self):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -4312,9 +4429,7 @@ class PakchanWindow(Adw.ApplicationWindow):
         self.update_status_lbl.set_hexpand(True)
         self.update_status_lbl.set_ellipsize(Pango.EllipsizeMode.END)
         header.append(self.update_status_lbl)
-        # Collapsed by default: this row alone acts as the status bar.
-        # Clicking it reveals the full log below without changing anything
-        # about the header itself.
+        # Collapsed by default
         self.update_expand_btn = Gtk.Button(icon_name="pan-down-symbolic")
         self.update_expand_btn.add_css_class("flat")
         self.update_expand_btn.set_tooltip_text("Show details")
@@ -4328,58 +4443,119 @@ class PakchanWindow(Adw.ApplicationWindow):
         header.append(self.update_close_btn)
         box.append(header)
 
-        self.update_log_revealer = Gtk.Revealer()
-        self.update_log_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_UP)
-        self.update_log_revealer.set_reveal_child(False)
-        log_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        log_box.append(Gtk.Separator())
+        # Plain show/hide
+        self.update_log_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.update_log_box.set_visible(False)
+        self.update_log_box.append(Gtk.Separator())
 
+        # Terminal or plain-text fallback
         if _HAVE_VTE:
             self.vte_term = Vte.Terminal()
             self.vte_term.set_size_request(-1, 220)
             self.vte_term.set_hexpand(True)
             self.vte_term.connect("child-exited", self._on_update_child_exited)
-            sc = Gtk.ScrolledWindow()
-            sc.set_child(self.vte_term)
-            log_box.append(sc)
+            self.vte_sc = Gtk.ScrolledWindow()
+            self.vte_sc.set_child(self.vte_term)
+            self.update_log_box.append(self.vte_sc)
         else:
-            # Fallback: no Vte on this system. Still a real pty underneath
-            # (so pkexec/sudo detect a tty correctly) — just rendered as a
-            # plain scrolling log instead of a proper terminal. No input
-            # box: with --noconfirm everywhere and pkexec handling the
-            # password via its own dialog, there's nothing left to type
-            # back into the update itself.
-            self.update_textview = Gtk.TextView()
-            self.update_textview.set_editable(False)
-            self.update_textview.set_cursor_visible(False)
-            self.update_textview.set_wrap_mode(Gtk.WrapMode.CHAR)
-            self.update_textview.add_css_class("update-log")
-            sc = Gtk.ScrolledWindow()
-            sc.set_child(self.update_textview)
-            sc.set_size_request(-1, 220)
-            log_box.append(sc)
+            self.vte_sc = None
 
-        self.update_log_revealer.set_child(log_box)
-        box.append(self.update_log_revealer)
+        # Plain scrolling log used whenever there's no pty involved
+        self.update_textview = Gtk.TextView()
+        self.update_textview.set_editable(False)
+        self.update_textview.set_cursor_visible(False)
+        self.update_textview.set_wrap_mode(Gtk.WrapMode.CHAR)
+        self.update_textview.add_css_class("update-log")
+        self.textview_sc = Gtk.ScrolledWindow()
+        self.textview_sc.set_child(self.update_textview)
+        self.textview_sc.set_size_request(-1, 220)
+        self.textview_sc.set_visible(not _HAVE_VTE)
+        self.update_log_box.append(self.textview_sc)
+
+        box.append(self.update_log_box)
         return box
 
     def _on_toggle_update_log(self, btn):
-        expanded = self.update_log_revealer.get_reveal_child()
-        self.update_log_revealer.set_reveal_child(not expanded)
+        expanded = self.update_log_box.get_visible()
+        self.update_log_box.set_visible(not expanded)
         btn.set_icon_name("pan-up-symbolic" if not expanded else "pan-down-symbolic")
         btn.set_tooltip_text("Hide details" if not expanded else "Show details")
 
     def _apply_updates(self, btn):
-        sel = [p for p in self.all_packages if p.checked]
+        sel = [p for p in self._selectable_pool() if p.checked]
         if not sel: return
-        dlg = Adw.AlertDialog(
-            heading="Apply updates?",
-            body=f"Update {len(sel)} package(s). You'll be asked for your "
-                 f"password in the usual system prompt.",
-        )
+        self._confirm_and_apply(sel)
+
+    def _confirm_and_apply(self, sel: list):
+        # AUR installs need an AUR helper (yay/paru) to actually run
+        aur_needs_helper = [p for p in sel if p.repo == "aur" and not p.installed]
+        if aur_needs_helper and not (cmd_exists("yay") or cmd_exists("paru")):
+            names = ", ".join(p.name for p in aur_needs_helper[:3])
+            if len(aur_needs_helper) > 3:
+                names += f", and {len(aur_needs_helper) - 3} more"
+            dlg = Adw.AlertDialog(
+                heading="AUR helper required",
+                body=f"Installing {names} from the AUR needs a helper like "
+                     f"yay or paru, which isn't installed. Install one first, "
+                     f"then try again.",
+            )
+            dlg.add_response("ok", "OK")
+            dlg.present(self)
+            return
+
+        # Conflict check (see _classify_batch_conflicts)
+        _resolved, unresolved = self._classify_batch_conflicts(sel)
+        if unresolved:
+            lines = "\n".join(f"• {p.name} conflicts with {c}" for p, c in unresolved[:5])
+            if len(unresolved) > 5:
+                lines += f"\n…and {len(unresolved) - 5} more"
+            dlg = Adw.AlertDialog(
+                heading="Conflicting packages selected",
+                body=(f"{lines}\n\nInstalling these while the conflicting "
+                      f"package stays installed can leave pacman/the AUR "
+                      f"helper stuck trying to resolve it. Either uncheck "
+                      f"the install, or also check the conflicting package "
+                      f"so it's removed as part of the same batch."),
+            )
+            dlg.add_response("ok", "OK")
+            dlg.present(self)
+            return
+
+        all_installs = all(not p.installed for p in sel)
+        any_installs = any(not p.installed for p in sel)
+        removals = [p for p in sel if p.marked_remove]
+        removal_only = bool(removals) and len(removals) == len(sel)
+        if removal_only:
+            names = ", ".join(p.name for p in removals[:5])
+            if len(removals) > 5:
+                names += f", and {len(removals) - 5} more"
+            heading, verb = "Uninstall selected packages?", "Uninstall"
+            body = (f"Remove {names}. Any dependencies these packages pulled "
+                     f"in that nothing else needs will be removed too — "
+                     f"pacman refuses on its own if something else still "
+                     f"depends on one of them. You'll be asked for your "
+                     f"password in the usual system prompt.")
+        elif removals or any_installs:
+            heading, verb = "Apply selected changes?", "Apply"
+            body = (f"{verb} {len(sel)} package(s)"
+                     + (f", including {len(removals)} removal(s)" if removals else "")
+                     + ". You'll be asked for your password in the usual "
+                       f"system prompt.")
+        elif all_installs:
+            heading, verb = "Install selected packages?", "Install"
+            body = (f"{verb} {len(sel)} package(s). You'll be asked for your "
+                     f"password in the usual system prompt.")
+        else:
+            heading, verb = "Update selected packages?", "Update"
+            body = (f"{verb} {len(sel)} package(s). You'll be asked for your "
+                     f"password in the usual system prompt.")
+        dlg = Adw.AlertDialog(heading=heading, body=body)
         dlg.add_response("cancel", "Cancel")
-        dlg.add_response("apply", "Apply")
-        dlg.set_response_appearance("apply", Adw.ResponseAppearance.SUGGESTED)
+        dlg.add_response("apply", verb)
+        # A pure removal batch gets the destructive (red) styling instead
+        appearance = (Adw.ResponseAppearance.DESTRUCTIVE if removal_only
+                      else Adw.ResponseAppearance.SUGGESTED)
+        dlg.set_response_appearance("apply", appearance)
         dlg.set_default_response("apply")
         dlg.set_close_response("cancel")
         dlg.connect("response", self._on_apply_dialog_response, sel)
@@ -4389,72 +4565,122 @@ class PakchanWindow(Adw.ApplicationWindow):
         if response == "apply":
             self._do_apply(sel)
 
-    def _make_sudo_shim(self) -> Optional[str]:
-        """Write a tiny `sudo` shim that redirects to `pkexec`, in its own
-        temp dir. When that dir is prepended to PATH, any command the
-        update script runs — including an AUR helper's own internal
-        `sudo` call for the final `pacman -U` step — asks for the
-        password via the normal graphical polkit prompt (a separate
-        system dialog) instead of pakchan trying to read it from inside
-        its own log panel, which was confusing and didn't actually work.
-        """
-        if not cmd_exists("pkexec"):
-            return None
+    def _make_askpass_script(self) -> Optional[str]:
+        """graphical password prompt"""
         try:
-            d = tempfile.mkdtemp(prefix="pakchan-sudo-")
-            shim = Path(d) / "sudo"
-            shim.write_text("#!/bin/sh\nexec pkexec \"$@\"\n")
-            shim.chmod(0o755)
-            return d
+            d = tempfile.mkdtemp(prefix="pakchan-askpass-")
+            gtk_fallback = Path(d) / "askpass_gtk.py"
+            gtk_fallback.write_text(_ASKPASS_GTK_SCRIPT)
+            gtk_fallback.chmod(0o755)
+            env_lines = "\n".join(
+                f"export {var}={shlex.quote(val)}"
+                for var in ("DISPLAY", "XAUTHORITY", "WAYLAND_DISPLAY",
+                            "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS")
+                for val in [os.environ.get(var, "")] if val
+            )
+            script = Path(d) / "askpass"
+            script.write_text(
+                "#!/bin/sh\n"
+                f"{env_lines}\n"
+                "if command -v zenity >/dev/null 2>&1; then\n"
+                "    exec zenity --password --title='Authentication required'\n"
+                "elif command -v kdialog >/dev/null 2>&1; then\n"
+                "    exec kdialog --password 'Enter your password:'\n"
+                "else\n"
+                f"    exec python3 {shlex.quote(str(gtk_fallback))}\n"
+                "fi\n"
+            )
+            script.chmod(0o755)
+            return str(script)
         except Exception:
             return None
 
     def _do_apply(self, sel: list):
-        # Fix #7: shlex.quote all package names — prevents shell injection
-        pac = [shlex.quote(p.name) for p in sel if p.repo == "pacman"]
-        aur = [shlex.quote(p.name) for p in sel if p.repo == "aur"]
-        flt = [shlex.quote(p.name) for p in sel if p.repo == "flatpak"]
-        snp = [shlex.quote(p.name) for p in sel if p.repo == "snap"]
+        # shlex.quote all package names
+        pac = [shlex.quote(p.name) for p in sel if p.repo == "pacman" and not p.marked_remove]
+        aur = [shlex.quote(p.name) for p in sel if p.repo == "aur" and not p.marked_remove]
+        snp = [shlex.quote(p.name) for p in sel if p.repo == "snap" and not p.marked_remove]
 
-        # Use pkexec instead of sudo for our own root commands: it pops
-        # the standard graphical password dialog (the polkit agent) as
-        # its own window, rather than needing a tty-attached prompt we'd
-        # have to surface somewhere in our UI.
-        have_pkexec = cmd_exists("pkexec")
-        root_cmd = "pkexec" if have_pkexec else "sudo"
+        # Flatpak update vs. install use different commands
+        flt_update  = [shlex.quote(p.name) for p in sel
+                       if p.repo == "flatpak" and p.installed and not p.marked_remove]
+        flt_new_by_remote: dict[str, list[str]] = {}
+        for p in sel:
+            if p.repo == "flatpak" and not p.installed:
+                flt_new_by_remote.setdefault(p.remote or "flathub", []).append(
+                    shlex.quote(p.name))
+
+        # Removals does not need an AUR helper — plain pacman -R covers it
+        resolved_conflicts, _unresolved = self._classify_batch_conflicts(sel)
+        early_removal_names = {c for _incoming, c in resolved_conflicts}
+        rm_pac_aur_early = [shlex.quote(p.name) for p in sel
+                             if p.repo in ("pacman", "aur") and p.marked_remove
+                             and p.name in early_removal_names]
+        rm_pac_aur_late  = [shlex.quote(p.name) for p in sel
+                             if p.repo in ("pacman", "aur") and p.marked_remove
+                             and p.name not in early_removal_names]
+        rm_flatpak = [shlex.quote(p.name) for p in sel
+                      if p.repo == "flatpak" and p.marked_remove]
+        rm_snap    = [shlex.quote(p.name) for p in sel
+                      if p.repo == "snap" and p.marked_remove]
+
+        # Privilege escalation differs by what's being installed
+        askpass_path = self._make_askpass_script() if aur else None
+        self._askpass_dir = str(Path(askpass_path).parent) if askpass_path else None
+        env_prefix = (f'export SUDO_ASKPASS={shlex.quote(askpass_path)}; '
+                      if askpass_path else "")
+        if aur:
+            # Don't let a stray git fetch hang waiting for credentials
+            env_prefix += 'export GIT_TERMINAL_PROMPT=0; '
+            env_prefix += 'unset GPG_TTY; '
+
+        # A single pkexec call needs no separate SUDO_ASKPASS setup
+        use_pkexec = cmd_exists("pkexec")
+        single_root_cmd = "pkexec" if use_pkexec else "sudo -A"
 
         cmds = []
-        if pac: cmds.append(f"{root_cmd} pacman -S --noconfirm {' '.join(pac)}")
+        # Conflict-resolving removals run first
+        if rm_pac_aur_early:
+            cmds.append(f"{single_root_cmd} pacman -Rns --noconfirm {' '.join(rm_pac_aur_early)}")
+        if pac: cmds.append(f"{single_root_cmd} pacman -S --noconfirm {' '.join(pac)}")
         if aur:
             h = "yay" if cmd_exists("yay") else "paru"
             cmds.append(f"{h} -S --noconfirm {' '.join(aur)}")
-        if flt: cmds.append(f"flatpak update -y {' '.join(flt)}")
-        if snp: cmds.append(f"{root_cmd} snap refresh {' '.join(snp)}")
+        if flt_update: cmds.append(f"flatpak update -y {' '.join(flt_update)}")
+        for remote, ids in flt_new_by_remote.items():
+            cmds.append(f"flatpak install -y {shlex.quote(remote)} {' '.join(ids)}")
+        if snp: cmds.append(f"{single_root_cmd} snap refresh {' '.join(snp)}")
+        # Everything else settles after installs/updates, same as pacman's own -Syu order
+        if rm_pac_aur_late: cmds.append(f"{single_root_cmd} pacman -Rns --noconfirm {' '.join(rm_pac_aur_late)}")
+        if rm_flatpak: cmds.append(f"flatpak uninstall -y {' '.join(rm_flatpak)}")
+        if rm_snap:    cmds.append(f"{single_root_cmd} snap remove {' '.join(rm_snap)}")
         if not cmds:
             return
         full = " && ".join(cmds)
 
-        # If an AUR helper is involved, it'll call plain `sudo` itself
-        # for the final install step — route that through the same
-        # pkexec shim so it also uses the graphical prompt.
-        self._sudo_shim_dir = self._make_sudo_shim() if (aur and have_pkexec) else None
-        path_prefix = (f'export PATH="{self._sudo_shim_dir}:$PATH"; '
-                        if self._sudo_shim_dir else "")
+        # Capture the real exit status so it survives the echo/Done lines
         runner = (f'printf "\\033[1m$ {full}\\033[0m\\n"; '
-                  f'{path_prefix}{full}; echo; echo "[pakchan] Done."')
+                  f'{env_prefix}{full}; status=$?; echo; '
+                  f'echo "[pakchan] Done."; exit $status')
 
         self.apply_btn.set_sensitive(False)
         self.update_spinner.start()
         self.update_close_btn.set_sensitive(False)
-        self.update_status_lbl.set_text(f"Updating {len(sel)} package(s)…")
-        self.footer.set_text(f"Updating {len(sel)} package(s)…")
+        progress_verb = ("Removing" if (rm_pac_aur_early or rm_pac_aur_late or rm_flatpak or rm_snap)
+                          and not (pac or aur or snp or flt_update or flt_new_by_remote)
+                          else "Updating")
+        self.update_status_lbl.set_text(f"{progress_verb} {len(sel)} package(s)…")
+        self.footer.set_text(f"{progress_verb} {len(sel)} package(s)…")
         self.update_revealer.set_reveal_child(True)
-        # Deliberately not touching update_log_revealer here — whether the
-        # log is expanded or collapsed carries over from however the user
-        # last left it this session (only resets to collapsed if the app
-        # itself is restarted, since the panel is rebuilt fresh then).
 
-        if _HAVE_VTE:
+        # AUR installs need to run with no controlling terminal at all
+        use_vte = _HAVE_VTE and not aur
+        self._last_run_used_vte = use_vte
+        if self.vte_sc:
+            self.vte_sc.set_visible(use_vte)
+        self.textview_sc.set_visible(not use_vte)
+
+        if use_vte:
             self.vte_term.reset(True, True)
             self.vte_term.spawn_async(
                 Vte.PtyFlags.DEFAULT,
@@ -4477,10 +4703,7 @@ class PakchanWindow(Adw.ApplicationWindow):
             self.update_close_btn.set_sensitive(True)
             self.apply_btn.set_sensitive(True)
             return
-        # The terminal widget itself only shows anything once the log is
-        # expanded, so poll its buffer for the last line and mirror it
-        # onto the always-visible status row/footer (pamac-style), the
-        # same way the pty-fallback path already does per output chunk.
+        # Mirror the terminal's last line onto the always-visible status footer
         self._vte_poll_id = GLib.timeout_add(400, self._poll_vte_status)
 
     def _poll_vte_status(self):
@@ -4503,23 +4726,18 @@ class PakchanWindow(Adw.ApplicationWindow):
             self._vte_poll_id = None
         self._update_finished(status)
 
-    # ── Fallback path when Vte isn't installed ───────────────────────────────
+    # ── Pty-less fallback (used when Vte isn't installed, and always for AUR installs even when it is — see _do_apply's comment on why) ───────────────────────────────
 
     def _run_update_pty_fallback(self, runner: str):
         buf = self.update_textview.get_buffer()
         buf.set_text("")
-        # No pty here on purpose: pkexec authenticates via its own GUI
-        # dialog (not by checking isatty on our stdin), so we don't need
-        # one for that anymore. Without a pty, pacman/AUR helpers detect
-        # non-interactive output and print plain, complete lines instead
-        # of \r-redrawn progress bars — which sidesteps an entire class
-        # of terminal-emulation bugs (cursor tricks, partial redraws)
-        # rather than trying to hand-parse them.
         try:
             proc = subprocess.Popen(
                 ["/bin/bash", "-lc", runner],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
                 text=True, bufsize=1,
+                start_new_session=True,
             )
         except Exception as e:
             self.update_status_lbl.set_text(f"Failed to start update: {e}")
@@ -4538,43 +4756,75 @@ class PakchanWindow(Adw.ApplicationWindow):
         GLib.idle_add(self._update_finished, status)
 
     def _append_update_output(self, line: str):
-        # Belt-and-braces: strip any ANSI codes a tool might still emit
-        # even without a pty (a few don't check isatty before coloring).
+        # Strip ANSI codes even without a pty
         line = _ANSI_ESCAPE_RE.sub("", line).rstrip("\n")
         if line.strip():
             tb = self.update_textview.get_buffer()
             tb.insert(tb.get_end_iter(), line + "\n")
             self.update_textview.scroll_mark_onscreen(tb.get_insert())
 
-            # Surface the current line as the visible status — this is
-            # what shows in the collapsed panel row, so it needs to
-            # actually say what's happening. Password prompts are
-            # skipped: pkexec/the sudo shim handles those via a separate
-            # system dialog now.
+            # Surface the current line as the visible status
             if "assword" not in line:
                 snippet = line.strip()[:100]
                 self.update_status_lbl.set_text(snippet)
                 self.footer.set_text(snippet)
         return False
 
+    def _show_toast(self, title: str, timeout: int = 8, button_label: str = None, button_cb=None):
+        toast = Adw.Toast(title=title, timeout=timeout)
+        if button_label and button_cb:
+            toast.set_button_label(button_label)
+            toast.connect("button-clicked", button_cb)
+        self.toast_overlay.add_toast(toast)
+
+    def _last_error_snippet(self) -> str:
+        """Pull the most useful line from the log for the failure toast."""
+        text = ""
+        if getattr(self, "_last_run_used_vte", False):
+            try:
+                text = self.vte_term.get_text()[0] or ""
+            except Exception:
+                text = ""
+        else:
+            buf = self.update_textview.get_buffer()
+            text = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), True)
+        lines = [_ANSI_ESCAPE_RE.sub("", ln).strip() for ln in text.splitlines()]
+        lines = [ln for ln in lines if ln and "assword" not in ln]
+        for ln in reversed(lines):
+            if "error:" in ln.lower() or ln.lower().startswith("==> error"):
+                return ln
+        for ln in reversed(lines):
+            if ln != "[pakchan] Done.":
+                return ln
+        return ""
+
+    def _reveal_update_log(self, *_a):
+        self.update_revealer.set_reveal_child(True)
+        self.update_log_box.set_visible(True)
+        self.update_expand_btn.set_icon_name("pan-up-symbolic")
+        self.update_expand_btn.set_tooltip_text("Hide details")
+
     def _update_finished(self, status: int):
         self.update_spinner.stop()
         self.update_close_btn.set_sensitive(True)
         self.apply_btn.set_sensitive(True)
-        shim_dir = getattr(self, "_sudo_shim_dir", None)
-        if shim_dir:
-            shutil.rmtree(shim_dir, ignore_errors=True)
-            self._sudo_shim_dir = None
+        askpass_dir = getattr(self, "_askpass_dir", None)
+        if askpass_dir:
+            shutil.rmtree(askpass_dir, ignore_errors=True)
+            self._askpass_dir = None
         ok = (status == 0)
         msg = ("Update finished — refreshing package list…" if ok else
                f"Update process exited with an error (code {status}) — "
                f"refreshing package list anyway…")
         self.update_status_lbl.set_text(msg)
         self.footer.set_text(msg)
-        # This is the fix for stale "still selected / still shows as
-        # updatable" packages: rather than trying to patch each Package's
-        # state from parsed terminal output, just re-read the real state
-        # from pacman/AUR/flatpak/snap, the same way startup does.
+        if not ok:
+            # A toast survives the status label getting overwritten
+            detail = self._last_error_snippet()
+            toast_msg = f"Action failed: {detail}" if detail else f"Action failed (exit code {status})"
+            self._show_toast(toast_msg, timeout=0,
+                              button_label="View log", button_cb=self._reveal_update_log)
+        # Re-read real package state instead of trusting stale UI flags
         self._load_packages()
         return False
 
@@ -4589,8 +4839,9 @@ def _on_exit():
 if __name__ == "__main__":
     import atexit
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    _load_mappings_from_cache()   # Fix #1: disk-only at startup, instant
+    _load_mappings_from_cache()   # disk-only at startup, instant
+    _load_aur_meta_from_cache()   # Same pattern, for AUR search-to-install
     _cl_db_load()
-    atexit.register(_on_exit)     # Fix #2: always flush on exit
+    atexit.register(_on_exit)     # always flush on exit
     app = PakchanApp()
     sys.exit(app.run(sys.argv))
