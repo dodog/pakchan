@@ -11,6 +11,8 @@
   <img src="/web/img/pakchan-logo-wide.png" alt="PAKCHAN">
 </picture>
 
+<br>
+
 
 **Pakchan** is a GTK4 package manager for Manjaro and Arch Linux based system that fetches **real changelogs** for package updates (Pacman, AUR, Flatpak, Snap) — not just "an update is available."
 It also includes a community-driven changelog source database so those sources can be found reliably.
@@ -138,6 +140,8 @@ Pakchan stores changelog source mappings in `data/mappings.json`, which is fetch
 ## ❤️ Support
 
 If Pakchan saves you some digging through websites, news files, commit logs, you can buy me a [coffee ☕](https://buymeacoffee.com/dodog)
+
+[![Buy Me A Coffee](https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=☕&slug=dodog&button_colour=FFDD00&font_colour=000000&font_family=Lato&outline_colour=000000&coffee_colour=ffffff)](https://www.buymeacoffee.com/dodog)
 
 ## License
 
