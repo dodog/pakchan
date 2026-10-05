@@ -20,7 +20,7 @@ It also includes a community-driven changelog source database so those sources c
 
 
 ## ❓ Why I created Pakchan
-You hit update and your package manager **tells you... nothing**. Just a version number and a promise. Most package managers tell you an **update exists, but not what changed**.
+You hit update and your package manager **tells you... nothing**. Just a version number. Most package managers tell you an **update exists, but not what changed**.
 
 Pakchan goes and finds out. It digs up the real release notes — from GitHub, GitLab, the project's own website, Flathub, AUR,  wherever they actually live — and puts them right in front of you before you update anything. 
 
@@ -31,13 +31,10 @@ Pakchan goes and finds out. It digs up the real release notes — from GitHub, G
 
 
 ### Changelogs that actually mean something
-This is the whole point. Before you update anything, Pakchan shows you the real changelog for the *version* you're about to install — not the vague version bump. If it can't find one, it tells you why instead of leaving you guessing, and links you to the project's homepage so you can go look yourself. Curious how it actually finds these? See wiki [How Pakchan works](https://github.com/dodog/pakchan/wiki/How-Pakchan-works).
-
-### Update with confidence
-Select a batch of installs, updates, and removals and let Pakchan handle it as one job — with a live terminal view so you can watch exactly what's happening. It also quietly checks for package conflicts before anything runs.
+Before you update anything, Pakchan shows you the real changelog for the *version* you're about to install — not the vague version bump. If it can't find one, it tells you why instead of leaving you guessing, and links you to the project's homepage so you can go look yourself. Are curious how it actually finds these? See wiki [How Pakchan works](https://github.com/dodog/pakchan/wiki/How-Pakchan-works).
 
 ### Everything on your desktop
-Pakchan brings all your packages from Pacman, AUR, Flatpak — installed and installable — into a single, searchable window, sorted the way you'd expect: by installed, by "needs an update," or just by source. Built with GTK4 and libadwaita, so it fits right in — proper icons for your apps, a clean sidebar, keyboard shortcuts (<kbd>Ctrl+F</kbd> to search, <kbd>Esc</kbd> to back out), and a right-click menu for the quick stuff.
+Pakchan brings all your packages from Pacman, AUR, Flatpak — installed and installable — into a single, searchable window, sorted the way you'd expect: by installed, by "needs an update," or just by source. Built with GTK4 and libadwaita, so it fits right in — proper icons for your apps, a clean sidebar, keyboard shortcuts.
 
 ### No accounts, no API keys, no catch
 Every changelog source Pakchan uses is free and public. Nothing to sign up for, nothing to configure. And where a package doesn't have an obvious source, the community fills the gap — anyone can [submit a mapping](https://dodog.github.io/pakchan/web/) in a couple of clicks, and it becomes available to everyone.
