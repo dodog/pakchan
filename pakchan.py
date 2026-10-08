@@ -197,6 +197,110 @@ def _dbg_get() -> list[str]:
     return list(_debug_trace)
 
 
+# ─── Network / input fixes ────────────────────────────────────────────────
+import ipaddress, socket, zlib
+
+_MAX_HTTP_BYTES     = 8 * 1024 * 1024
+_MAX_AUR_GZ_BYTES   = 128 * 1024 * 1024
+_MAX_AUR_JSON_BYTES = 512 * 1024 * 1024
+
+
+def _is_http_url(url: str) -> bool:
+    """True only for absolute http(s) URLs."""
+    try:
+        p = urllib.parse.urlsplit(url or "")
+    except ValueError:
+        return False
+    return p.scheme in ("http", "https") and bool(p.netloc)
+
+
+def _host_is_blocked(host: str) -> bool:
+    host = (host or "").strip("[]").lower().rstrip(".")
+    if not host:
+        return True
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host.split("%")[0])
+    except ValueError:
+        try:   # shorthand/octal/hex forms such as 127.1 or 0x7f000001
+            ip = ipaddress.IPv4Address(socket.inet_aton(host))
+        except OSError:
+            return False
+    return not ip.is_global
+
+
+def _check_request_url(req) -> None:
+    try:
+        parts = urllib.parse.urlsplit(req.full_url)
+        host = parts.hostname or ""
+    except ValueError as e:
+        raise urllib.error.URLError(f"bad URL: {e}")
+    if parts.scheme not in ("http", "https") or _host_is_blocked(host):
+        raise urllib.error.URLError(f"blocked URL: {req.full_url}")
+
+
+class _SafeHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        _check_request_url(req)
+        return super().http_open(req)
+
+
+class _SafeHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        _check_request_url(req)
+        return super().https_open(req)
+
+
+def _install_safe_opener() -> None:
+    opener = urllib.request.OpenerDirector()
+    for h in (urllib.request.ProxyHandler(), urllib.request.UnknownHandler(),
+              _SafeHTTPHandler(), _SafeHTTPSHandler(),
+              urllib.request.HTTPDefaultErrorHandler(),
+              urllib.request.HTTPRedirectHandler(),
+              urllib.request.HTTPErrorProcessor()):
+        opener.add_handler(h)
+    urllib.request.install_opener(opener)
+
+_install_safe_opener()
+
+
+def _read_capped(resp, limit: int = _MAX_HTTP_BYTES) -> bytes:
+    chunks, total = [], 0
+    while True:
+        chunk = resp.read(65536)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise ValueError(f"response larger than {limit} bytes")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _gunzip_capped(data: bytes, limit: int) -> bytes:
+    out = b""
+    while data:
+        d = zlib.decompressobj(wbits=31)
+        out += d.decompress(data, limit + 1 - len(out))
+        if len(out) > limit:
+            raise ValueError(f"decompressed data larger than {limit} bytes")
+        if not d.eof:
+            raise EOFError("truncated gzip stream")
+        data = d.unused_data
+    return out
+
+
+_SAFE_IDENT_RE = re.compile(r'[A-Za-z0-9@_+][A-Za-z0-9@._+-]*')
+
+def _is_safe_ident(s: str) -> bool:
+    return bool(s) and _SAFE_IDENT_RE.fullmatch(s) is not None
+
+
+def _on_activate_link(_label, uri: str) -> bool:
+    return not _is_http_url(uri)
+
+
 def http_get(url: str, timeout: int = 14) -> Optional[str]:
     """Send realistic browser headers so release-note sites don't reject requests."""
     try:
@@ -209,7 +313,7 @@ def http_get(url: str, timeout: int = 14) -> Optional[str]:
             "Accept-Language": "en-US,en;q=0.9",
         })
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.read().decode("utf-8", errors="replace")
+            return _read_capped(r).decode("utf-8", errors="replace")
     except urllib.error.HTTPError as e:
         if e.code == 406:
             try:
@@ -219,7 +323,7 @@ def http_get(url: str, timeout: int = 14) -> Optional[str]:
                     "Accept-Language": "en-US,en;q=0.9",
                 })
                 with urllib.request.urlopen(req, timeout=timeout) as r:
-                    return r.read().decode("utf-8", errors="replace")
+                    return _read_capped(r).decode("utf-8", errors="replace")
             except Exception:
                 return None
         return None
@@ -236,7 +340,7 @@ def http_get_json(url: str, timeout: int = 14):
             "Accept-Language": "en-US,en;q=0.9",
         })
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            body = r.read().decode("utf-8", errors="replace")
+            body = _read_capped(r).decode("utf-8", errors="replace")
     except urllib.error.HTTPError as e:
         if e.code == 406:
             try:
@@ -249,7 +353,7 @@ def http_get_json(url: str, timeout: int = 14):
                     "Accept-Language": "en-US,en;q=0.9",
                 })
                 with urllib.request.urlopen(req, timeout=timeout) as r:
-                    body = r.read().decode("utf-8", errors="replace")
+                    body = _read_capped(r).decode("utf-8", errors="replace")
             except Exception:
                 return None
         else:
@@ -1045,7 +1149,7 @@ def _refresh_mappings_bg():
 def _parse_aur_meta(gz_bytes: bytes) -> dict[str, dict]:
     """Parse AUR's packages-meta-ext-v1.json.gz into a name-keyed lookup."""
     try:
-        raw  = gzip.decompress(gz_bytes)
+        raw  = _gunzip_capped(gz_bytes, _MAX_AUR_JSON_BYTES)
         data = json.loads(raw)
     except Exception as e:
         print(f"[aur-meta] decompress/parse failed: {e}", file=sys.stderr)
@@ -1106,7 +1210,7 @@ def _refresh_aur_meta_bg():
             req = urllib.request.Request(
                 AUR_META_URL, headers={"User-Agent": "Pakchan/2.0"})
             with urllib.request.urlopen(req, timeout=30) as r:
-                gz_bytes = r.read()
+                gz_bytes = _read_capped(r, _MAX_AUR_GZ_BYTES)
         except Exception as e:
             print(f"[aur-meta] fetch failed: {e}", file=sys.stderr)
             return
@@ -2830,7 +2934,7 @@ def fetch_changelog_snap(pkg: Package) -> dict:
             f"https://api.snapcraft.io/v2/snaps/info/{urllib.parse.quote(pkg.name)}",
             headers=headers)
         with urllib.request.urlopen(req, timeout=14) as resp:
-            data = json.loads(resp.read())
+            data = json.loads(_read_capped(resp))
     except Exception:
         data = None
     if data and isinstance(data, dict):
@@ -3476,6 +3580,9 @@ class PakchanWindow(Adw.ApplicationWindow):
 
     def _open_uri(self, url: str):
         if not url:
+            return
+        if not _is_http_url(url):
+            self.footer.set_text("Refusing to open a non-http(s) link.")
             return
         try:
             Gio.AppInfo.launch_default_for_uri(url, None)
@@ -4123,6 +4230,7 @@ class PakchanWindow(Adw.ApplicationWindow):
             escaped_url = GLib.markup_escape_text(url)
             link_lbl = Gtk.Label()
             link_lbl.set_markup(f'See <a href="{escaped_url}">{escaped_url}</a> for details.')
+            link_lbl.connect("activate-link", _on_activate_link)
             link_lbl.set_xalign(0)
             link_lbl.set_wrap(True); link_lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
             link_lbl.set_hexpand(True)
@@ -4160,6 +4268,7 @@ class PakchanWindow(Adw.ApplicationWindow):
             escaped_desc = GLib.markup_escape_text(f"Source: {desc_text}".rstrip())
             escaped_url  = GLib.markup_escape_text(src_url)
             src.set_markup(f'{escaped_desc}  <a href="{escaped_url}">{escaped_url}</a>')
+            src.connect("activate-link", _on_activate_link)
         else:
             src.set_text(f"Source: {src_desc}")
         src.add_css_class("dim-label"); src.set_margin_bottom(2)
@@ -4172,6 +4281,7 @@ class PakchanWindow(Adw.ApplicationWindow):
             manual_lbl = Gtk.Label()
             manual_lbl.set_markup(
                 f'Please check manually at: <a href="{escaped_url}">{escaped_url}</a>')
+            manual_lbl.connect("activate-link", _on_activate_link)
             manual_lbl.set_xalign(0)
             manual_lbl.set_wrap(True); manual_lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
             manual_lbl.set_hexpand(True)
@@ -4596,6 +4706,18 @@ class PakchanWindow(Adw.ApplicationWindow):
             return None
 
     def _do_apply(self, sel: list):
+        rejected = [p for p in sel
+                    if not _is_safe_ident(p.name)
+                    or (p.repo == "flatpak" and p.remote and not _is_safe_ident(p.remote))]
+        if rejected:
+            rej_ids = {id(p) for p in rejected}
+            sel = [p for p in sel if id(p) not in rej_ids]
+            msg = (f"Skipped {len(rejected)} package(s) with unsafe names: "
+                   + ", ".join(repr(p.name)[:60] for p in rejected[:3]))
+            print(f"[pakchan] {msg}", file=sys.stderr)
+            self.footer.set_text(msg)
+            if not sel:
+                return
         # shlex.quote all package names
         pac = [shlex.quote(p.name) for p in sel if p.repo == "pacman" and not p.marked_remove]
         aur = [shlex.quote(p.name) for p in sel if p.repo == "aur" and not p.marked_remove]
@@ -4659,7 +4781,7 @@ class PakchanWindow(Adw.ApplicationWindow):
         full = " && ".join(cmds)
 
         # Capture the real exit status so it survives the echo/Done lines
-        runner = (f'printf "\\033[1m$ {full}\\033[0m\\n"; '
+        runner = (f"printf '\\033[1m$ %s\\033[0m\\n' {shlex.quote(full)}; "
                   f'{env_prefix}{full}; status=$?; echo; '
                   f'echo "[pakchan] Done."; exit $status')
 
