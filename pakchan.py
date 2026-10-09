@@ -178,27 +178,65 @@ def run(cmd: list, timeout: int = 30) -> tuple:
         return "", "timeout", 1
 
 
-def run_git(cmd: list, timeout: int = 10) -> tuple:
-    """Run git command with shorter timeout (git can hang on blocked repos)."""
-    return run(cmd, timeout=timeout)
+_GIT_SAFE_OPTS = ["-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
+                  "-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=10",
+                  "-c", "credential.helper="]
+
+
+def run_git(cmd: list, timeout: float = 10) -> tuple:
+    ctx = _ctx()
+    if ctx is not None:
+        left = ctx.deadline - time.monotonic()
+        if left <= 0:
+            ctx.incomplete = True
+            raise FetchBudgetExceeded()
+        timeout = min(timeout, left)
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_CONFIG_NOSYSTEM="1",
+               GIT_CONFIG_GLOBAL="/dev/null", LC_ALL="C")
+    full = [cmd[0], *_GIT_SAFE_OPTS, *cmd[1:]]
+    try:
+        p = subprocess.Popen(full, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             stdin=subprocess.DEVNULL, text=True, errors="replace",
+                             env=env, start_new_session=True)
+    except FileNotFoundError:
+        return "", f"not found: {cmd[0]}", 127
+    try:
+        out, err = p.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            p.communicate(timeout=2)
+        except Exception:
+            pass
+        return "", "timeout", 1
+    return out.strip(), err.strip(), p.returncode
 
 
 # ─── Debug tracing ────────────────────────────────────────────────────────────
 
-_debug_trace: list[str] = []
+_dbg_local = threading.local()
+
+def _dbg_trace() -> list[str]:
+    t = getattr(_dbg_local, "trace", None)
+    if t is None:
+        t = _dbg_local.trace = []
+    return t
 
 def _dbg(msg: str):
-    _debug_trace.append(msg)
+    _dbg_trace().append(msg)
 
 def _dbg_reset():
-    _debug_trace.clear()
+    _dbg_local.trace = []
 
 def _dbg_get() -> list[str]:
-    return list(_debug_trace)
+    return list(_dbg_trace())
 
 
-# ─── Network / input fixes ────────────────────────────────────────────────
-import ipaddress, socket, zlib
+# ─── Network / input hardening ────────────────────────────────────────────────
+import http.client, ipaddress, signal, socket, zlib
 
 _MAX_HTTP_BYTES     = 8 * 1024 * 1024
 _MAX_AUR_GZ_BYTES   = 128 * 1024 * 1024
@@ -240,16 +278,159 @@ def _check_request_url(req) -> None:
         raise urllib.error.URLError(f"blocked URL: {req.full_url}")
 
 
+# Failure budget: circuit breaker per host, lookup deadline
+_FETCH_BUDGET_S   = 25.0   # limit for one changelog lookup
+_GIT_BUDGET_S     = 20.0   # of which the git fallback may use at most this
+_REQ_TIMEOUT_CAP  = 10.0   # per-request ceiling while a lookup is running
+_HOST_DOWN_S      = 600    # how long a failing host is skipped afterwards
+_HOST_FAIL_LIMIT  = 2      # failures within the window before a host is skipped
+_HOST_FAIL_WINDOW = 90
+
+
+class FetchBudgetExceeded(Exception):
+    """The per-lookup deadline has passed."""
+
+
+class _FetchCtx:
+    __slots__ = ("deadline", "incomplete")
+
+    def __init__(self, seconds: float):
+        self.deadline = time.monotonic() + seconds
+        self.incomplete = False
+
+
+_budget_local = threading.local()
+
+
+def _ctx() -> Optional["_FetchCtx"]:
+    return getattr(_budget_local, "ctx", None)
+
+
+def _budget_begin(seconds: float) -> "_FetchCtx":
+    c = _budget_local.ctx = _FetchCtx(seconds)
+    return c
+
+
+def _budget_end() -> None:
+    _budget_local.ctx = None
+
+
+def _note_incomplete() -> None:
+    c = _ctx()
+    if c is not None:
+        c.incomplete = True
+
+
+_host_lock = threading.Lock()
+_host_down_until: dict[str, float] = {}
+_host_fails: dict[str, tuple[int, float]] = {}
+
+
+def _host_is_down(host: str) -> bool:
+    with _host_lock:
+        until = _host_down_until.get(host)
+        if until is None:
+            return False
+        if time.monotonic() < until:
+            return True
+        del _host_down_until[host]
+        return False
+
+
+def _mark_host_down(host: str, secs: float, why: str) -> None:
+    with _host_lock:
+        _host_down_until[host] = time.monotonic() + secs
+        _host_fails.pop(host, None)
+    _note_incomplete()
+    _dbg(f"[net] {host}: {why} — skipping it for {int(secs)} s")
+
+
+def _note_host_ok(host: str) -> None:
+    with _host_lock:
+        _host_fails.pop(host, None)
+
+
+def _note_net_failure(host: str, exc: BaseException) -> None:
+    """Timeouts, resets, TLS errors, 502/503/504."""
+    _note_incomplete()
+    reason = getattr(exc, "reason", exc)
+    weight = 2 if isinstance(reason, (ConnectionRefusedError, socket.gaierror)) else 1
+    now = time.monotonic()
+    with _host_lock:
+        n, last = _host_fails.get(host, (0, 0.0))
+        if now - last > _HOST_FAIL_WINDOW:
+            n = 0
+        n += weight
+        trip = n >= _HOST_FAIL_LIMIT
+        if not trip:
+            _host_fails[host] = (n, now)
+    _dbg(f"[net] {host}: {type(exc).__name__}: {str(exc)[:80]}")
+    if trip:
+        _mark_host_down(host, _HOST_DOWN_S, "repeated failures")
+
+
+def _note_http_status(host: str, resp) -> None:
+    status = getattr(resp, "status", None) or getattr(resp, "code", 200)
+    hdrs = getattr(resp, "headers", None)
+
+    def hdr(name: str):
+        return hdrs.get(name) if hdrs is not None else None
+
+    if status == 429 or (status == 403 and hdr("X-RateLimit-Remaining") == "0"):
+        secs = _HOST_DOWN_S
+        retry, reset = hdr("Retry-After"), hdr("X-RateLimit-Reset")
+        if retry and retry.isdigit():
+            secs = int(retry)
+        elif reset and reset.isdigit():
+            secs = int(reset) - int(time.time())
+        _mark_host_down(host, max(60, min(secs, 3600)), f"rate limited (HTTP {status})")
+    elif status in (502, 503, 504):
+        _note_net_failure(host, OSError(f"HTTP {status}"))
+    else:
+        _note_host_ok(host)
+
+
+def _guard_request(req) -> str:
+    _check_request_url(req)
+    host = (urllib.parse.urlsplit(req.full_url).hostname or "").lower()
+    if _host_is_down(host):
+        _note_incomplete()
+        raise urllib.error.URLError(f"{host} is temporarily marked unavailable")
+    ctx = _ctx()
+    req._pk_clamped = False
+    if ctx is not None:
+        left = ctx.deadline - time.monotonic()
+        if left <= 0:
+            ctx.incomplete = True
+            raise FetchBudgetExceeded()
+        t = req.timeout if isinstance(req.timeout, (int, float)) else _REQ_TIMEOUT_CAP
+        t = min(t, _REQ_TIMEOUT_CAP)
+        req._pk_clamped = left < t 
+        req.timeout = max(1.0, min(t, left))
+    return host
+
+
+def _track(host: str, fn, req):
+    try:
+        resp = fn(req)
+    except (OSError, http.client.HTTPException) as e:
+        if not getattr(req, "_pk_clamped", False):
+            _note_net_failure(host, e)
+        else:
+            _note_incomplete()
+        raise
+    _note_http_status(host, resp)
+    return resp
+
+
 class _SafeHTTPHandler(urllib.request.HTTPHandler):
     def http_open(self, req):
-        _check_request_url(req)
-        return super().http_open(req)
+        return _track(_guard_request(req), super().http_open, req)
 
 
 class _SafeHTTPSHandler(urllib.request.HTTPSHandler):
     def https_open(self, req):
-        _check_request_url(req)
-        return super().https_open(req)
+        return _track(_guard_request(req), super().https_open, req)
 
 
 def _install_safe_opener() -> None:
@@ -267,7 +448,11 @@ _install_safe_opener()
 
 def _read_capped(resp, limit: int = _MAX_HTTP_BYTES) -> bytes:
     chunks, total = [], 0
+    ctx = _ctx()
     while True:
+        if ctx is not None and time.monotonic() > ctx.deadline:
+            ctx.incomplete = True
+            raise FetchBudgetExceeded()
         chunk = resp.read(65536)
         if not chunk:
             break
@@ -1358,8 +1543,14 @@ def _fetch_parallel(urls: list[str], timeout: int = 12) -> dict[str, Optional[st
     if not urls:
         return {}
     results: dict[str, Optional[str]] = {}
+    ctx = _ctx()
+
+    def _one(u: str) -> Optional[str]:
+        _budget_local.ctx = ctx
+        return http_get(u, timeout)
+
     with ThreadPoolExecutor(max_workers=min(len(urls), 6)) as ex:
-        futs = {ex.submit(http_get, u, timeout): u for u in urls}
+        futs = {ex.submit(_one, u): u for u in urls}
         for f in as_completed(futs):
             results[futs[f]] = f.result()
     return results
@@ -2366,10 +2557,21 @@ def _fetch_gitlab_news_file(host: str, repo: str) -> Optional[dict]:
 def _gitlab_git_fallback(host: str, repo: str, _pkg_name: str) -> Optional[dict]:
     if not cmd_exists("git"):
         return None
+    if _host_is_down(host):
+        _dbg(f"[git] skipped: {host} is temporarily marked unavailable")
+        _note_incomplete()
+        return None
     repo_url = f"https://{host}/{repo}.git"
-    # Use shorter timeout for git operations; some repos may be slow/blocked
-    out, _, rc = run_git(["git", "ls-remote", "--tags", "--refs", repo_url], timeout=10)
+    git_deadline = time.monotonic() + _GIT_BUDGET_S
+
+    def _t(cap: float) -> float:
+        return max(1.0, min(cap, git_deadline - time.monotonic()))
+
+    out, err, rc = run_git(["git", "ls-remote", "--tags", "--refs", repo_url], timeout=_t(10))
     if rc != 0 or not out:
+        _dbg(f"[git] ls-remote {host}/{repo}: {err or 'no tags'}")
+        if err == "timeout":
+            _note_net_failure(host, TimeoutError("git ls-remote timed out"))
         return None
 
     tags: list[tuple[str, str]] = []
@@ -2392,20 +2594,30 @@ def _gitlab_git_fallback(host: str, repo: str, _pkg_name: str) -> Optional[dict]
     tags = tags[:6]
     versions = []
     with tempfile.TemporaryDirectory(prefix="pakchan-git-") as tmpdir:
-        init_rc = run(["git", "init", "--bare", tmpdir])[2]
-        if init_rc != 0:
+        if run_git(["git", "init", "--bare", "--quiet", tmpdir], timeout=_t(5))[2] != 0:
             return None
         git = ["git", "-C", tmpdir]
-        if run(git + ["remote", "add", "origin", repo_url])[2] != 0:
+        if run_git(git + ["remote", "add", "origin", repo_url], timeout=_t(5))[2] != 0:
+            return None
+
+        # One fetch for all tags
+        refspecs = [f"refs/tags/{t}:refs/tags/{t}" for t, _ in tags]
+        _, ferr, frc = run_git(git + ["fetch", "--quiet", "--depth", "1", "--no-tags",
+                                      "--filter=blob:none", "origin", *refspecs],
+                               timeout=_t(15))
+        if frc != 0:
+            _dbg(f"[git] fetch {host}/{repo}: {ferr[:120]}")
+            if ferr == "timeout":
+                _note_net_failure(host, TimeoutError("git fetch timed out"))
             return None
 
         for tag, _sha in tags:
-            fetch_rc = run(git + ["fetch", "--quiet", "--depth", "1", "origin",
-                                  f"refs/tags/{tag}:refs/tags/{tag}"])[2]
-            if fetch_rc != 0:
-                continue
-            date_out, _, date_rc = run(git + ["show", "-s", "--format=%cI", f"refs/tags/{tag}"])
-            body_out, _, body_rc = run(git + ["show", "-s", "--format=%B", f"refs/tags/{tag}"])
+            if time.monotonic() > git_deadline:
+                _dbg("[git] time budget used up")
+                _note_incomplete()
+                break
+            date_out, _, date_rc = run_git(git + ["show", "-s", "--format=%cI", f"refs/tags/{tag}"], timeout=_t(5))
+            body_out, _, body_rc = run_git(git + ["show", "-s", "--format=%B", f"refs/tags/{tag}"], timeout=_t(5))
             if date_rc != 0 or body_rc != 0:
                 continue
             date = date_out.strip().splitlines()[0] if date_out.strip() else ""
@@ -3003,6 +3215,7 @@ def fetch_changelog(pkg: Package) -> dict:
         return cached
 
     _dbg_reset()
+    ctx = _budget_begin(_FETCH_BUDGET_S)
     _dbg(f"Resolving changelog for package={pkg.name!r} repo={pkg.repo!r} "
          f"url={pkg.url!r}")
     try:
@@ -3014,6 +3227,15 @@ def fetch_changelog(pkg: Package) -> dict:
             _dbg(f"Unknown repo type: {pkg.repo!r}")
             return {"versions": [], "error": "Unknown repo.", "source": "error",
                     "_debug": _dbg_get()}
+    except FetchBudgetExceeded:
+        _dbg(f"[budget] gave up after {_FETCH_BUDGET_S:.0f} s")
+        if cached:      # return stale rather than nothing
+            cached["_from_cache"] = True
+            cached["_debug"] = _dbg_get()
+            return cached
+        return {"versions": [], "source": "error", "_incomplete": True, "_debug": _dbg_get(),
+                "error": f"Lookup took longer than {_FETCH_BUDGET_S:.0f} s and was stopped. "
+                         "Retry, or check the project's page manually."}
     except Exception as e:
         _dbg(f"EXCEPTION: {e}")
         if cached:      # return stale on error
@@ -3021,10 +3243,21 @@ def fetch_changelog(pkg: Package) -> dict:
             cached["_debug"] = _dbg_get()
             return cached
         return {"versions": [], "error": str(e), "source": "error", "_debug": _dbg_get()}
+    finally:
+        _budget_end()
 
     debug_trace = _dbg_get()
-    if result.get("versions") and not result.get("_link_only"):
-        _cl_cache_set(key, dict(result))   # cache a copy without _debug bloating disk
+    if ctx.incomplete:
+        # A source timed out, was rate-limited or was skipped.
+        result["_incomplete"] = True
+        if result.get("source") == "unavailable":
+            result = {"versions": [], "source": "error", "_incomplete": True,
+                      "error": "Some sources did not respond in time, so no changelog "
+                               "could be confirmed. Retry in a few minutes."}
+    real = (bool(result.get("versions")) and not result.get("_link_only")
+            and result.get("source") != "unavailable")
+    if result.get("versions") and (real or not ctx.incomplete):
+        _cl_cache_set(key, dict(result)) 
     result["_debug"] = debug_trace
     return result
 
@@ -3087,6 +3320,8 @@ class PakchanWindow(Adw.ApplicationWindow):
         self.all_packages:  list[Package] = []
         self.filtered:      list[Package] = []
         self.selected_pkg:  Optional[Package] = None
+        self._cl_inflight:     set[str] = set()
+        self._enrich_inflight: set[str] = set()
         self.current_tab    = "changelog"
         self.current_filter = "installed"
         self.current_sort   = SORT_OPTIONS[0]
@@ -4091,15 +4326,24 @@ class PakchanWindow(Adw.ApplicationWindow):
         if pkg.repo in ("flatpak", "snap") and (
                 not pkg.description or not pkg.url or
                 (pkg.repo == "flatpak" and not pkg.display_name)):
-            threading.Thread(target=self._enrich_bg, args=(pkg,), daemon=True).start()
+            if pkg.cl_key not in self._enrich_inflight:
+                self._enrich_inflight.add(pkg.cl_key)
+                threading.Thread(target=self._enrich_bg, args=(pkg,), daemon=True).start()
         self._render_detail()
 
     def _enrich_bg(self, pkg: Package):
-        enrich_pkg(pkg)
-        GLib.idle_add(self._enrich_done, pkg)
+        try:
+            enrich_pkg(pkg)
+        finally:
+            GLib.idle_add(self._enrich_done, pkg)
+
+    def _is_selected(self, pkg: Package) -> bool:
+        sp = self.selected_pkg
+        return sp is not None and sp.repo == pkg.repo and sp.name == pkg.name
 
     def _enrich_done(self, pkg: Package):
-        if self.selected_pkg and self.selected_pkg.name == pkg.name:
+        self._enrich_inflight.discard(pkg.cl_key)
+        if self._is_selected(pkg):
             self.d_name.set_markup(
                 f"<b>{GLib.markup_escape_text(pkg.display_name or pkg.name)}</b>")
             self.d_desc.set_text(pkg.description or "No description available.")
@@ -4212,7 +4456,9 @@ class PakchanWindow(Adw.ApplicationWindow):
             lbl = Gtk.Label(label="Fetching changelog…")
             lbl.add_css_class("dim-label"); lbl.set_halign(Gtk.Align.CENTER)
             self.d_box.append(lbl)
-            threading.Thread(target=self._bg_cl, args=(pkg,), daemon=True).start()
+            if pkg.cl_key not in self._cl_inflight:
+                self._cl_inflight.add(pkg.cl_key)
+                threading.Thread(target=self._bg_cl, args=(pkg,), daemon=True).start()
             return
 
         if pkg.changelog.get("error") and not pkg.changelog.get("versions"):
@@ -4386,7 +4632,7 @@ class PakchanWindow(Adw.ApplicationWindow):
             del _CL_DB[key]
             _cl_db_flush(force=True)
         pkg.changelog = None
-        if self.selected_pkg and self.selected_pkg.name == pkg.name:
+        if self._is_selected(pkg):
             self._render_detail()
 
     def _render_files(self, pkg: Package):
@@ -4456,8 +4702,7 @@ class PakchanWindow(Adw.ApplicationWindow):
         GLib.idle_add(self._files_done, pkg, lines)
 
     def _files_done(self, pkg: Package, lines: list):
-        if (self.selected_pkg and self.selected_pkg.name == pkg.name
-                and self.current_tab == "files"):
+        if self._is_selected(pkg) and self.current_tab == "files":
             self._clear()
             if lines:
                 for path in lines:
@@ -4471,12 +4716,19 @@ class PakchanWindow(Adw.ApplicationWindow):
         return False
 
     def _bg_cl(self, pkg: Package):
-        pkg.changelog = fetch_changelog(pkg)
+        try:
+            pkg.changelog = fetch_changelog(pkg)
+        except Exception as e:
+            pkg.changelog = {"versions": [], "error": str(e), "source": "error"}
         GLib.idle_add(self._cl_done, pkg)
 
     def _cl_done(self, pkg: Package):
-        if (self.selected_pkg and self.selected_pkg.name == pkg.name
-                and self.current_tab == "changelog"):
+        self._cl_inflight.discard(pkg.cl_key)
+        sel = self.selected_pkg
+        if (sel is not None and sel is not pkg and sel.cl_key == pkg.cl_key
+                and sel.changelog is None):
+            sel.changelog = pkg.changelog
+        if self._is_selected(pkg) and self.current_tab == "changelog":
             self._render_detail()
         return False
 
