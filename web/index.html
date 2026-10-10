@@ -221,6 +221,7 @@
                     <select id="sourceType">
                         <option value="github_releases">GitHub Releases</option>
                         <option value="gitlab_releases">GitLab Releases</option>
+                        <option value="forgejo_releases">Forgejo / Gitea / Codeberg Releases</option>
                         <option value="html_page">Release Notes Page (HTML)</option>
                         <option value="text_file">Plain Text File</option>
                     </select>
@@ -245,6 +246,18 @@
                     <div class="hint">Full repository path on GitLab</div>
                 </div>
 
+                <!-- Forgejo / Gitea / Codeberg -->
+                <div id="fieldForgejo" class="form-group" style="display:none;">
+                    <label style="font-weight: normal; color: #8b949e;">Forgejo Host</label>
+                    <input type="text" placeholder="codeberg.org or code.manjaro.org">
+                    <div class="hint">Domain of the Forgejo/Gitea instance. You can also paste the whole repository URL here.</div>
+                </div>
+                <div id="fieldForgejoRepo" class="form-group" style="display:none;">
+                    <label style="font-weight: normal; color: #8b949e;">Repository</label>
+                    <input type="text" placeholder="owner/repo (e.g., applications/manjaro-settings-manager)">
+                    <div class="hint">Always two parts: owner/repo</div>
+                </div>
+
                 <!-- URL -->
                 <div id="fieldUrl" class="form-group" style="display:none;">
                     <label style="font-weight: normal; color: #8b949e;">URL</label>
@@ -263,7 +276,7 @@
 
     <script>
         const MAPPINGS_URL = 'https://raw.githubusercontent.com/dodog/pakchan/main/data/mappings.json';
-        const MAPPING_SECTIONS = ['github', 'gitlab', 'custom', 'release_pages'];
+        const MAPPING_SECTIONS = ['github', 'gitlab', 'forgejo', 'custom', 'release_pages'];
 
         // Show/hide fields based on source type
         document.getElementById('sourceType').addEventListener('change', function() {
@@ -271,6 +284,8 @@
             document.getElementById('fieldGithub').style.display = type === 'github_releases' ? 'block' : 'none';
             document.getElementById('fieldGitlab').style.display = type === 'gitlab_releases' ? 'block' : 'none';
             document.getElementById('fieldGitlabRepo').style.display = type === 'gitlab_releases' ? 'block' : 'none';
+            document.getElementById('fieldForgejo').style.display = type === 'forgejo_releases' ? 'block' : 'none';
+            document.getElementById('fieldForgejoRepo').style.display = type === 'forgejo_releases' ? 'block' : 'none';
             document.getElementById('fieldUrl').style.display = ['html_page', 'text_file'].includes(type) ? 'block' : 'none';
         });
 
@@ -317,6 +332,29 @@
             return r;
         }
 
+        // Forgejo/Gitea repositories are always owner/repo. A whole repository URL may be
+        // pasted into either box (https://code.example.org/owner/repo/releases) and is split.
+        function parseForgejo(hostInput, repoInput) {
+            const hostParts = hostInput.trim().replace(/^https?:\/\//i, '').replace(/^\/+/, '')
+                .split('/').filter(Boolean);
+            let host = (hostParts[0] || '').toLowerCase();
+            const urlInRepo = repoInput.trim().match(/^https?:\/\/([^/]+)\//i);
+            if (!host && urlInRepo) host = urlInRepo[1].toLowerCase();
+            let r = repoInput.trim().replace(/^https?:\/\/[^/]+\//i, '').replace(/^\/+|\/+$/g, '');
+            if (!r && hostParts.length >= 3) r = hostParts.slice(1, 3).join('/');
+            const repo = r.split('/').filter(Boolean).slice(0, 2).join('/').replace(/\.git$/i, '');
+            return { host, repo };
+        }
+
+        function forgejoSubmission(host, repo) {
+            if (!host) return { error: 'Please enter the Forgejo host (e.g., codeberg.org)' };
+            if (!/^[A-Za-z0-9.-]+(:\d+)?$/.test(host)) return { error: 'The host must be a plain domain name like codeberg.org' };
+            if (!repo) return { error: 'Please enter the repository (owner/repo)' };
+            if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) || repo.split('/').some(s => s === '.' || s === '..'))
+                return { error: 'The repository must be in owner/repo format' };
+            return { type: 'forgejo', value: { host, repo } };
+        }
+
         // Given a source type + form inputs, build {type, value} matching mappings.json's schema
         function buildSubmission(packageName, sourceType) {
             if (sourceType === 'github_releases') {
@@ -332,6 +370,13 @@
                 if (!host) return { error: 'Please enter a GitLab host' };
                 if (!repo) return { error: 'Please enter a GitLab repository path' };
                 return { type: 'gitlab', value: { host, repo } };
+            }
+
+            if (sourceType === 'forgejo_releases') {
+                const { host, repo } = parseForgejo(
+                    document.querySelector('#fieldForgejo input').value,
+                    document.querySelector('#fieldForgejoRepo input').value);
+                return forgejoSubmission(host, repo);
             }
 
             if (sourceType === 'text_file') {

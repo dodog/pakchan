@@ -149,6 +149,7 @@
         
         .badge-github { background: #1b3424; color: #2ea043; }
         .badge-gitlab { background: #341b24; color: #f778ba; }
+        .badge-forgejo { background: #3a2b1b; color: #f0883e; }
         .badge-html   { background: #1b2434; color: #58a6ff; }
         .badge-text   { background: #34341b; color: #d2991d; }
         .badge-other  { background: #2b213a; color: #a371f7; }
@@ -217,6 +218,7 @@
             <button class="filter-btn active" data-filter="all">All</button>
             <button class="filter-btn" data-filter="github">GitHub</button>
             <button class="filter-btn" data-filter="gitlab">GitLab</button>
+            <button class="filter-btn" data-filter="forgejo">Forgejo</button>
             <button class="filter-btn" data-filter="release_pages">Release Notes</button>
             <button class="filter-btn" data-filter="text_file">Text File</button>
             <button class="filter-btn" data-filter="other">Other</button>
@@ -234,9 +236,9 @@
     
     <script>
         const MAPPINGS_URL = 'https://raw.githubusercontent.com/dodog/pakchan/main/data/mappings.json';
-        // Types produced directly by github/gitlab/release_pages; anything else (e.g. a
+        // Types produced directly by github/gitlab/forgejo/release_pages; anything else (e.g. a
         // "custom" entry with parser "mantisbt") falls into "other".
-        const KNOWN_TYPES = ['github', 'gitlab', 'release_pages', 'text_file'];
+        const KNOWN_TYPES = ['github', 'gitlab', 'forgejo', 'release_pages', 'text_file'];
 
         let allPackages = {};
         let currentFilter = 'all';
@@ -251,6 +253,9 @@
                 }
                 for (const [name, gl] of Object.entries(data.gitlab || {})) {
                     allPackages[name] = { name, type: 'gitlab', value: `${gl.host}/${gl.repo}` };
+                }
+                for (const [name, fj] of Object.entries(data.forgejo || {})) {
+                    allPackages[name] = { name, type: 'forgejo', value: `${fj.host}/${fj.repo}` };
                 }
                 for (const [name, url] of Object.entries(data.release_pages || {})) {
                     allPackages[name] = { name, type: 'release_pages', value: url };
@@ -339,6 +344,7 @@
             const classes = {
                 github: 'badge-github',
                 gitlab: 'badge-gitlab',
+                forgejo: 'badge-forgejo',
                 release_pages: 'badge-html',
                 text_file: 'badge-text'
             };
@@ -349,6 +355,7 @@
             const icons = {
                 github: '🐱',
                 gitlab: '🦊',
+                forgejo: '⚒️',
                 release_pages: '🌐',
                 text_file: '📄',
                 mantisbt: '🐛'
@@ -360,6 +367,7 @@
             const labels = {
                 github: 'GitHub',
                 gitlab: 'GitLab',
+                forgejo: 'Forgejo',
                 release_pages: 'Release Notes',
                 text_file: 'Text File',
                 mantisbt: 'MantisBT'
