@@ -300,10 +300,7 @@
       "repo": "profiles-and-settings/manjaro-kde-settings"
     },
 
-    "mhwd": {
-      "host": "gitlab.manjaro.org",
-      "repo": "applications/mhwd"
-    },
+
     "mousepad": {
       "host": "gitlab.xfce.org",
       "repo": "apps/mousepad"
