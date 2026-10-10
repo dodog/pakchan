@@ -813,6 +813,7 @@ def _pending_flatpak_updates_cached() -> dict:
     return _parse_flatpak_updates(out) if rc == 0 else {}
 
 
+# Online checks 
 def _pending_pacman_updates_online() -> Optional[dict]:
     """checkupdates syncs a private copy of the databases from the mirrors."""
     if not cmd_exists("checkupdates"):
@@ -1359,6 +1360,7 @@ KNOWN_AUR_META: dict[str, dict] = {}   # {name: {version, desc, url, license, de
 
 KNOWN_GITHUB_REPOS:  dict[str, str]             = {}
 KNOWN_GITLAB_REPOS:  dict[str, tuple[str, str]] = {}
+KNOWN_FORGEJO_REPOS: dict[str, tuple[str, str]] = {}
 KNOWN_RELEASE_PAGES: dict[str, str]             = {}
 
 # Algorithm selection
@@ -1379,8 +1381,36 @@ KNOWN_GITLAB_LIKE = {
     "gitlab.archlinux.org",
 }
 
+# Forgejo/Gitea hosts 
+KNOWN_FORGEJO_HOSTS = {"codeberg.org", "code.manjaro.org"}
+
+
+def _forgejo_hosts() -> set:
+    return KNOWN_FORGEJO_HOSTS | {h.lower() for h, _ in KNOWN_FORGEJO_REPOS.values()}
+
+
+def _is_forgejo_host(host: str) -> bool:
+    return (host or "").lower() in _forgejo_hosts()
+
+
+def _forgejo_in_url(url: str) -> Optional[tuple]:
+    """(host, 'owner/repo') if the URL points into a known Forgejo/Gitea host."""
+    try:
+        p = urllib.parse.urlsplit(url or "")
+    except ValueError:
+        return None
+    host = (p.hostname or "").lower()
+    if not _is_forgejo_host(host):
+        return None
+    parts = [s for s in p.path.split("/") if s]
+    if len(parts) < 2:
+        return None
+    return host, f"{parts[0]}/{parts[1].removesuffix('.git')}"
+
+
 def _apply_mappings(data: dict):
-    global KNOWN_GITHUB_REPOS, KNOWN_GITLAB_REPOS, KNOWN_RELEASE_PAGES, KNOWN_CUSTOM
+    global KNOWN_GITHUB_REPOS, KNOWN_GITLAB_REPOS, KNOWN_FORGEJO_REPOS
+    global KNOWN_RELEASE_PAGES, KNOWN_CUSTOM
     KNOWN_GITHUB_REPOS  = data.get("github", {})
     KNOWN_RELEASE_PAGES = data.get("release_pages", {})
     # Merge any remotely-provided custom mappings with local defaults
@@ -1396,6 +1426,11 @@ def _apply_mappings(data: dict):
     KNOWN_GITLAB_REPOS = {
         pkg: (info["host"], info["repo"])
         for pkg, info in raw_gl.items()
+        if isinstance(info, dict) and "host" in info and "repo" in info
+    }
+    KNOWN_FORGEJO_REPOS = {
+        pkg: (info["host"], info["repo"])
+        for pkg, info in (data.get("forgejo") or {}).items()
         if isinstance(info, dict) and "host" in info and "repo" in info
     }
 
@@ -1654,11 +1689,11 @@ def _fetch_parallel(urls: list[str], timeout: int = 12) -> dict[str, Optional[st
 def _scrape_custom(pkg_name: str, entry: dict, target_version: str = "") -> Optional[dict]:
     """Dispatch to custom parser based on entry['parser'] field."""
     parser = entry.get("parser", "")
-    if parser == "gitlab":
+    if parser in ("gitlab", "forgejo"):
         host = entry.get("host", "")
         repo = entry.get("repo", "")
         if host and repo:
-            return _gitlab_releases(host, repo, pkg_name, target_version)
+            return _forge_releases(host, repo, pkg_name, target_version, forge=parser)
         return None
 
     url = entry.get("url", "")
@@ -2264,7 +2299,9 @@ def _find_repo_link_in_page(url: str) -> Optional[tuple]:
                 raw_full = raw
         low = raw_full.lower()
         # Filter only GitHub / GitLab-looking links
-        if "github.com" not in low and "gitlab" not in low and not any(low.endswith(k) for k in ("invent.kde.org","source.kde.org")):
+        if ("github.com" not in low and "gitlab" not in low
+                and not any(k in low for k in ("invent.kde.org", "source.kde.org"))
+                and not any(h in low for h in _forgejo_hosts())):
             continue
 
         _dbg(f"[homepage scan] candidate href: {raw_full}")
@@ -2313,6 +2350,15 @@ def _find_repo_link_in_page(url: str) -> Optional[tuple]:
                 _dbg(f"[homepage scan] gitlab candidate rejected (not group/project): {raw_full}")
                 continue
 
+        # If host is a known Forgejo/Gitea instance
+        if _is_forgejo_host(host):
+            fj = _forgejo_in_url(raw_full)
+            if fj:
+                _dbg(f"[homepage scan] forgejo candidate -> host={fj[0]} repo={fj[1]}")
+                return ("forgejo", fj[0], fj[1])
+            _dbg(f"[homepage scan] forgejo candidate rejected (not owner/repo): {raw_full}")
+            continue
+
     _dbg("[homepage scan] no repo link found")
     return None
 
@@ -2335,6 +2381,12 @@ def _find_repo_via_homepage(url: str, pkg_name: str = "") -> Optional[tuple]:
         repo = gl.group(2).rstrip("/")
         if not pkg_name or _repo_name_plausible(pkg_name, repo):
             return ("gitlab", gl.group(1), repo)
+        return None
+
+    fj = _forgejo_in_url(url)
+    if fj:
+        if not pkg_name or _repo_name_plausible(pkg_name, fj[1]):
+            return ("forgejo", fj[0], fj[1])
         return None
 
     found = _find_repo_link_in_page(url)
@@ -2498,9 +2550,82 @@ def _versions_contain_target(versions: list[dict], target_version: str) -> bool:
 _GIT_FIRST_HOSTS = {"invent.kde.org", "source.kde.org"}
 
 
-def _gitlab_releases(host: str, repo: str, _pkg_name: str,
-                     target_version: str = "") -> Optional[dict]:
-    """Try, in priority order: GitLab Releases API, Tags API, a NEWS/CHANGELOG file, then raw git tags."""
+# GitLab and Forgejo (also Gitea, Codeberg)
+_FORGES = {
+    "gitlab": {
+        "label":        "GitLab",
+        "releases":     "https://{host}/api/v4/projects/{enc}/releases?per_page=20",
+        "tags":         "https://{host}/api/v4/projects/{enc}/repository/tags?per_page=20",
+        "project":      "https://{host}/api/v4/projects/{enc}",
+        "raw":          "https://{host}/{repo}/-/raw/{branch}/{fname}",
+        "web_releases": "https://{host}/{repo}/-/releases",
+        "rel_notes":    "description",
+        "rel_date":     ("released_at", "created_at"),
+        "tag_date":     ("commit", "created_at"),
+    },
+    "forgejo": {
+        "label":        "Forgejo",
+        "releases":     "https://{host}/api/v1/repos/{repo}/releases?limit=20",
+        "tags":         "https://{host}/api/v1/repos/{repo}/tags?limit=20",
+        "project":      "https://{host}/api/v1/repos/{repo}",
+        "raw":          "https://{host}/{repo}/raw/branch/{branch}/{fname}",
+        "web_releases": "https://{host}/{repo}/releases",
+        "rel_notes":    "body",
+        "rel_date":     ("published_at", "created_at"),
+        "tag_date":     ("commit", "created"),
+    },
+}
+
+_FORGE_HOST_RE = re.compile(r'[A-Za-z0-9.-]+(:\d+)?')
+_FORGE_REPO_RE = re.compile(r'[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+')
+
+
+def _forge_target_ok(host: str, repo: str) -> bool:
+    return (bool(_FORGE_HOST_RE.fullmatch(host or "")) and bool(_FORGE_REPO_RE.fullmatch(repo or ""))
+            and not any(seg in (".", "..") for seg in repo.split("/")))
+
+
+def _dig(d, *keys):
+    for k in keys:
+        d = d.get(k) if isinstance(d, dict) else None
+    return d
+
+
+def _sort_versions_newest_first(versions: list) -> None:
+    """Newest first. Normally by version number, but if that contradicts the dates, trust the dates."""
+    versions.sort(key=lambda v: _tag_selection_key(v.get("version", "")), reverse=True)
+    dated = [v for v in versions if re.match(r"\d{4}-\d{2}-\d{2}", v.get("date") or "")]
+    if len(dated) < 3 or len(dated) < 0.6 * len(versions):
+        return
+    top = versions[0]
+    if top not in dated:
+        return
+    try:
+        newest = max(datetime.strptime(v["date"][:10], "%Y-%m-%d") for v in dated)
+        gap = (newest - datetime.strptime(top["date"][:10], "%Y-%m-%d")).days
+    except ValueError:
+        return
+    if gap > 365:
+        versions.sort(key=lambda v: ((v.get("date") or "")[:10],
+                                     _tag_selection_key(v.get("version", ""))), reverse=True)
+
+
+def _restates_version(line: str, tag_name: str, version: str) -> bool:
+    """A tag message that only repeats the tag/version show nothing about what changed."""
+    core = re.sub(r"^[\s+*\-]*(?:release|version|ver\.?|v)?\s*", "", line.strip(), flags=re.I)
+    core = core.strip(" .:-").lower()
+    return core in {version.lower(), tag_name.lower(), tag_name.lower().lstrip("v")}
+
+
+def _forge_releases(host: str, repo: str, _pkg_name: str,
+                    target_version: str = "", forge: str = "gitlab") -> Optional[dict]:
+    """Try, in priority order: Releases API, Tags API, a NEWS/CHANGELOG file, then raw git
+    tags. Works for GitLab-style and Forgejo/Gitea-style hosts (see _FORGES)."""
+    spec  = _FORGES[forge]
+    label = spec["label"]
+    if not _forge_target_ok(host, repo):
+        _dbg(f"[{forge}] refusing suspicious host/repo: {host!r} {repo!r}")
+        return None
     best_stale: Optional[dict] = None        # newest entry looked older than target
     best_unconfirmed: Optional[dict] = None  # satisfies target, but exact version not literally listed
 
@@ -2509,20 +2634,19 @@ def _gitlab_releases(host: str, repo: str, _pkg_name: str,
         nonlocal best_stale, best_unconfirmed
         if not result or not result.get("versions"):
             return None
-        result["versions"].sort(
-            key=lambda v: _tag_selection_key(v.get("version", "")), reverse=True)
+        _sort_versions_newest_first(result["versions"])
         if _target_version_satisfied(result["versions"], target_version):
             if target_version and not _versions_contain_target(result["versions"], target_version):
                 # Newest entry is at least as new as the target
                 result["_version_unconfirmed"] = True
-                _dbg(f"[gitlab] {result.get('source')}: satisfies target "
+                _dbg(f"[{forge}] {result.get('source')}: satisfies target "
                      f"{target_version!r} but it isn't literally listed — "
                      f"keeping as fallback, trying next source for a confirmed match")
                 if best_unconfirmed is None:
                     best_unconfirmed = result
                 return None
             return result
-        _dbg(f"[gitlab] {result.get('source')}: newest found "
+        _dbg(f"[{forge}] {result.get('source')}: newest found "
              f"{result['versions'][0].get('version')!r} looks older than "
              f"target {target_version!r} — trying next source")
         if best_stale is None:
@@ -2531,35 +2655,39 @@ def _gitlab_releases(host: str, repo: str, _pkg_name: str,
 
     # For known problematic hosts, try git access before API calls
     if host in _GIT_FIRST_HOSTS:
-        r = _consider(_gitlab_git_fallback(host, repo, _pkg_name))
+        r = _consider(_gitlab_git_fallback(host, repo, _pkg_name, label))
         if r:
             return r
 
-    encoded = urllib.parse.quote(repo, safe="")
+    fmt = {"host": host, "repo": repo, "enc": urllib.parse.quote(repo, safe="")}
 
     # 2. Releases API
-    data = http_get_json(f"https://{host}/api/v4/projects/{encoded}/releases?per_page=20")
+    data = http_get_json(spec["releases"].format(**fmt))
     if data and isinstance(data, list) and data:
         versions = []
         for rel in data:
+            if not isinstance(rel, dict) or rel.get("draft"):
+                continue
             ver  = _extract_version_from_tag(rel.get("tag_name") or "")
-            date = (rel.get("released_at") or rel.get("created_at") or "")[:10]
-            desc = rel.get("description") or ""
+            date = next((rel[k] for k in spec["rel_date"] if rel.get(k)), "")[:10]
+            desc = rel.get(spec["rel_notes"]) or ""
             changes = _parse_md_changelog(desc)
             versions.append({"version": ver, "date": date,
                              "changes": changes[:10] or [desc[:120].replace("\n"," ")] or [f"Release {ver}"]})
-        versions.sort(key=lambda v: _tag_selection_key(v.get("version", "")), reverse=True)
+        _sort_versions_newest_first(versions)
         versions = versions[:6]
         if any(_is_meaningful_changelog(v.get("changes", [])) for v in versions):
-            r = _consider({"versions": versions, "source": f"GitLab Releases — {host}/{repo}"})
+            r = _consider({"versions": versions, "source": f"{label} Releases — {host}/{repo}"})
             if r:
                 return r
 
     # 3. Tags API
-    tags = http_get_json(f"https://{host}/api/v4/projects/{encoded}/repository/tags?per_page=20")
+    tags = http_get_json(spec["tags"].format(**fmt))
     if tags and isinstance(tags, list) and tags:
         candidates = []
         for tag in tags:
+            if not isinstance(tag, dict):
+                continue
             ver = _extract_version_from_tag(tag.get("name") or "")
             msg = tag.get("message") or (tag.get("commit") or {}).get("message", "")
             if not msg or "no release notes" in msg.lower():
@@ -2568,26 +2696,28 @@ def _gitlab_releases(host: str, repo: str, _pkg_name: str,
                        if l.strip() and not l.strip().startswith("#")
                        and not _is_pgp_garbage(l)
                        # Drop the tag's generic "Release version X.Y.Z" line — no real content
-                       and not re.match(r'^release\s+version\s+[\d.]+\s*$', l.strip(), re.I)]
+                       and not re.match(r'^release\s+version\s+[\d.]+\s*$', l.strip(), re.I)
+                       # ...and lines that merely repeat the tag/version ("0.5.8", "v0.5.6")
+                       and not _restates_version(l, tag.get("name") or "", ver)]
             if changes:
                 candidates.append({
                     "version": ver,
-                    "date": ((tag.get("commit") or {}).get("created_at") or "")[:10],
+                    "date": str(_dig(tag, *spec["tag_date"]) or "")[:10],
                     "changes": changes[:8],
                 })
-        candidates.sort(key=lambda v: _tag_selection_key(v.get("version", "")), reverse=True)
+        _sort_versions_newest_first(candidates)
         candidates = candidates[:6]
         if any(_is_meaningful_changelog(v.get("changes", [])) for v in candidates):
-            r = _consider({"versions": candidates, "source": f"GitLab tags — {host}/{repo}"})
+            r = _consider({"versions": candidates, "source": f"{label} tags — {host}/{repo}"})
             if r:
                 return r
 
     # 4. NEWS/CHANGELOG file in the repo root
-    r = _consider(_fetch_gitlab_news_file(host, repo))
+    r = _consider(_fetch_forge_news_file(host, repo, forge))
     if r:
         return r
 
-    r = _consider(_gitlab_git_fallback(host, repo, _pkg_name))
+    r = _consider(_gitlab_git_fallback(host, repo, _pkg_name, label))
     if r:
         return r
 
@@ -2601,23 +2731,31 @@ def _gitlab_releases(host: str, repo: str, _pkg_name: str,
     return None
 
 
-def _gitlab_default_branch(host: str, repo: str) -> Optional[str]:
-    """Look up the project's actual default branch via the GitLab API."""
-    encoded = urllib.parse.quote(repo, safe="")
-    data = http_get_json(f"https://{host}/api/v4/projects/{encoded}")
+def _gitlab_releases(host: str, repo: str, _pkg_name: str,
+                     target_version: str = "") -> Optional[dict]:
+    return _forge_releases(host, repo, _pkg_name, target_version, forge="gitlab")
+
+
+def _forge_default_branch(host: str, repo: str, forge: str = "gitlab") -> Optional[str]:
+    """Look up the project's actual default branch via the forge's API."""
+    spec = _FORGES[forge]
+    data = http_get_json(spec["project"].format(
+        host=host, repo=repo, enc=urllib.parse.quote(repo, safe="")))
     if data and isinstance(data, dict):
         db = data.get("default_branch")
-        if db:
+        if isinstance(db, str) and re.fullmatch(r"[A-Za-z0-9_./-]+", db):
             return db
     return None
 
 
-def _fetch_gitlab_news_file(host: str, repo: str) -> Optional[dict]:
-    """Try NEWS/CHANGELOG files via GitLab's raw-file endpoint."""
+def _fetch_forge_news_file(host: str, repo: str, forge: str = "gitlab") -> Optional[dict]:
+    """Try NEWS/CHANGELOG files via the forge's raw-file endpoint."""
+    spec = _FORGES[forge]
     filenames = ["NEWS", "CHANGELOG", "NEWS.md", "CHANGELOG.md",
                  "CHANGES", "CHANGES.md", "HISTORY", "HISTORY.md"]
-    branch = _gitlab_default_branch(host, repo) or "main"
-    urls = [f"https://{host}/{repo}/-/raw/{branch}/{fname}" for fname in filenames]
+    branch = _forge_default_branch(host, repo, forge) or "main"
+    urls = [spec["raw"].format(host=host, repo=repo, branch=branch, fname=fname)
+            for fname in filenames]
     pages = _fetch_parallel(urls, timeout=10)
     found_any_body = False
     for url in urls:
@@ -2635,19 +2773,20 @@ def _fetch_gitlab_news_file(host: str, repo: str) -> Optional[dict]:
                     key=lambda v: _tag_selection_key(v.get("version", "")),
                     reverse=True)
                 fname = url.rsplit("/", 1)[-1]
-                result["source"] = f"GitLab {fname} — {host}/{repo}"
-                _dbg(f"[gitlab] NEWS/CHANGELOG file (HTTP): found and parsed {fname}")
+                result["source"] = f"{spec['label']} {fname} — {host}/{repo}"
+                _dbg(f"[{forge}] NEWS/CHANGELOG file (HTTP): found and parsed {fname}")
                 return result
     if found_any_body:
-        _dbg(f"[gitlab] NEWS/CHANGELOG file (HTTP): found a file but couldn't "
+        _dbg(f"[{forge}] NEWS/CHANGELOG file (HTTP): found a file but couldn't "
              f"parse any versions from it")
     else:
-        _dbg(f"[gitlab] NEWS/CHANGELOG file (HTTP): none of the common "
+        _dbg(f"[{forge}] NEWS/CHANGELOG file (HTTP): none of the common "
              f"filenames exist on branch {branch!r} at {host}/{repo}")
     return None
 
 
-def _gitlab_git_fallback(host: str, repo: str, _pkg_name: str) -> Optional[dict]:
+def _gitlab_git_fallback(host: str, repo: str, _pkg_name: str,
+                         label: str = "GitLab") -> Optional[dict]:
     if not cmd_exists("git"):
         return None
     if _host_is_down(host):
@@ -2740,7 +2879,7 @@ def _gitlab_git_fallback(host: str, repo: str, _pkg_name: str) -> Optional[dict]
                 break
     if versions:
         return {"versions": versions,
-                "source": f"GitLab git — {host}/{repo}"}
+                "source": f"{label} git — {host}/{repo}"}
     # No meaningful annotated tags found via git fallback
     return None
 
@@ -2778,7 +2917,17 @@ def _upstream_changelog(url: str, pkg_name: str, version: str) -> Optional[dict]
             "_link_url": page_url,
         }
 
-    # Known GitLab/GitHub mappings: return a link-only fallback for direct callers
+    # Known Forgejo/GitLab/GitHub mappings: return a link-only fallback for direct callers
+    if name in KNOWN_FORGEJO_REPOS:
+        host, repo = KNOWN_FORGEJO_REPOS[name]
+        url = _FORGES["forgejo"]["web_releases"].format(host=host, repo=repo)
+        return {
+            "versions": [{"version": version, "date": "",
+                          "changes": [f"See {url} for details."]}],
+            "source": f"Forgejo repo mapping — {host}/{repo}",
+            "_link_only": True,
+            "_link_url": url,
+        }
     if name in KNOWN_GITLAB_REPOS:
         host, repo = KNOWN_GITLAB_REPOS[name]
         url = f"https://{host}/{repo}/-/releases"
@@ -2812,7 +2961,12 @@ def _upstream_changelog(url: str, pkg_name: str, version: str) -> Optional[dict]
     if gl:
         r = _gitlab_releases(gl.group(1), gl.group(2).removesuffix(".git"), pkg_name, version)
         if r and r.get("versions"): return r
-    # 3. Homepage scraping (GitHub or GitLab — whichever the homepage links to)
+    # 2b. Direct Forgejo/Gitea URL (known hosts only)
+    fj = _forgejo_in_url(url)
+    if fj:
+        r = _forge_releases(fj[0], fj[1], pkg_name, version, forge="forgejo")
+        if r and r.get("versions"): return r
+    # 3. Homepage scraping (GitHub, GitLab or Forgejo — whichever the homepage links to)
     fallback_link = None
     found = _find_repo_via_homepage(url, pkg_name)
     if found:
@@ -2820,6 +2974,10 @@ def _upstream_changelog(url: str, pkg_name: str, version: str) -> Optional[dict]
             r = _github_releases(found[1], pkg_name)
             if r and r.get("versions"): return r
             fallback_link = f"https://github.com/{found[1]}/releases"
+        elif found[0] == "forgejo":
+            r = _forge_releases(found[1], found[2], pkg_name, version, forge="forgejo")
+            if r and r.get("versions"): return r
+            fallback_link = _FORGES["forgejo"]["web_releases"].format(host=found[1], repo=found[2])
         else:
             r = _gitlab_releases(found[1], found[2], pkg_name, version)
             if r and r.get("versions"): return r
@@ -2868,6 +3026,20 @@ def _check_mappings_first(pkg: Package) -> Optional[dict]:
             "versions": [{"version": pkg.version, "date": "",
                           "changes": [f"See {url} for details."]}],
             "source": f"GitLab repo mapping — {host}/{repo}",
+            "_link_only": True,
+            "_link_url": url,
+        }
+
+    if name in KNOWN_FORGEJO_REPOS:
+        host, repo = KNOWN_FORGEJO_REPOS[name]
+        r = _forge_releases(host, repo, pkg.name, target_version, forge="forgejo")
+        if r and r.get("versions"):
+            return r
+        url = _FORGES["forgejo"]["web_releases"].format(host=host, repo=repo)
+        return {
+            "versions": [{"version": pkg.version, "date": "",
+                          "changes": [f"See {url} for details."]}],
+            "source": f"Forgejo repo mapping — {host}/{repo}",
             "_link_only": True,
             "_link_url": url,
         }
@@ -2996,8 +3168,16 @@ def fetch_changelog_pacman(pkg: Package) -> dict:
                 _dbg(f"[3] direct GitLab URL: hit ({host}/{repo})")
                 return r
             _dbg(f"[3] direct GitLab URL {host}/{repo}: no usable data")
-        if not gh and not gl:
-            _dbg("[3] package URL is not a direct GitHub/GitLab link")
+        fj = _forgejo_in_url(pkg.url)
+        if fj:
+            host, repo = fj
+            r = _forge_releases(host, repo, pkg.name, target_version, forge="forgejo")
+            if r and r.get("versions"):
+                _dbg(f"[3] direct Forgejo URL: hit ({host}/{repo})")
+                return r
+            _dbg(f"[3] direct Forgejo URL {host}/{repo}: no usable data")
+        if not gh and not gl and not fj:
+            _dbg("[3] package URL is not a direct GitHub/GitLab/Forgejo link")
     else:
         _dbg("[3] no package URL to check")
 
@@ -3013,6 +3193,13 @@ def fetch_changelog_pacman(pkg: Package) -> dict:
                     _dbg("[4] homepage-discovered repo: hit")
                     return r
                 fallback_link = f"https://github.com/{found[1]}/releases"
+            elif found[0] == "forgejo":
+                _dbg(f"[4] homepage scan found Forgejo repo: {found[1]}/{found[2]}")
+                r = _forge_releases(found[1], found[2], pkg.name, target_version, forge="forgejo")
+                if r and r.get("versions"):
+                    _dbg("[4] homepage-discovered repo: hit")
+                    return r
+                fallback_link = _FORGES["forgejo"]["web_releases"].format(host=found[1], repo=found[2])
             else:
                 _dbg(f"[4] homepage scan found GitLab repo: {found[1]}/{found[2]}")
                 r = _gitlab_releases(found[1], found[2], pkg.name, target_version)
@@ -3085,6 +3272,14 @@ def fetch_changelog_aur(pkg: Package) -> dict:
                 _dbg(f"[3] direct GitLab URL: hit ({host}/{repo})")
                 return r
             _dbg(f"[3] direct GitLab URL {host}/{repo}: no usable data")
+        fj = _forgejo_in_url(pkg.url)
+        if fj:
+            host, repo = fj
+            r = _forge_releases(host, repo, pkg.name, target_version, forge="forgejo")
+            if r and r.get("versions"):
+                _dbg(f"[3] direct Forgejo URL: hit ({host}/{repo})")
+                return r
+            _dbg(f"[3] direct Forgejo URL {host}/{repo}: no usable data")
     else:
         _dbg("[3] no package URL to check")
 
@@ -3100,6 +3295,13 @@ def fetch_changelog_aur(pkg: Package) -> dict:
                     _dbg("[4] homepage-discovered repo: hit")
                     return r
                 fallback_link = f"https://github.com/{found[1]}/releases"
+            elif found[0] == "forgejo":
+                _dbg(f"[5] homepage scan found Forgejo repo: {found[1]}/{found[2]}")
+                r = _forge_releases(found[1], found[2], pkg.name, target_version, forge="forgejo")
+                if r and r.get("versions"):
+                    _dbg("[4] homepage-discovered repo: hit")
+                    return r
+                fallback_link = _FORGES["forgejo"]["web_releases"].format(host=found[1], repo=found[2])
             else:
                 _dbg(f"[4] homepage scan found GitLab repo: {found[1]}/{found[2]}")
                 r = _gitlab_releases(found[1], found[2], pkg.name, target_version)
@@ -3366,7 +3568,7 @@ def _resolve_source_url(changelog: dict) -> Optional[str]:
     m = re.search(r'GitHub[^—]*—\s*([\w.-]+/[\w.-]+)', source)
     if m:
         return f"https://github.com/{m.group(1)}"
-    m = re.search(r'GitLab[^—]*—\s*([\w.\-]+)/([\w.\-]+/[\w.\-]+)', source)
+    m = re.search(r'(?:GitLab|Forgejo)[^—]*—\s*([\w.\-]+)/([\w.\-]+/[\w.\-]+)', source)
     if m:
         return f"https://{m.group(1)}/{m.group(2)}"
     return None
@@ -4320,7 +4522,7 @@ class PakchanWindow(Adw.ApplicationWindow):
     # ── Online update check (second phase of loading) ─────────────────────────
 
     def _start_update_check(self):
-        """Uupdate info from local data; online check (mirrors, AUR, Flathub) runs in the background and refines it."""
+        """Update info from local data; online check (mirrors, AUR, Flathub) runs in the background and refines it."""
         if self._update_busy:
             self._update_pending = True
             return
