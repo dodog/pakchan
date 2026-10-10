@@ -10,6 +10,10 @@
       "parser": "text_file",
       "url": "https://raw.githubusercontent.com/spesmilo/electrum/refs/heads/master/RELEASE-NOTES"
     },
+    "filezilla": {
+      "parser": "filezilla",
+      "url": "https://filezilla-project.org/newsfeed.php"
+    },
     "gpsd": {
       "parser": "text_file",
       "url": "https://gpsd.gitlab.io/gpsd/NEWS"
@@ -18,13 +22,19 @@
       "parser": "text_file",
       "url": "https://codeberg.org/mbunkus/mkvtoolnix/raw/branch/main/NEWS.md"
     },
-    "filezilla": {
-      "parser": "filezilla",
-      "url": "https://filezilla-project.org/newsfeed.php"
-    },    
     "xnviewmp": {
       "parser": "mantisbt",
       "url": "https://www.xnview.com/mantisbt/changelog_page.php"
+    }
+  },
+  "forgejo": {
+    "manjaro-settings-manager": {
+      "host": "code.manjaro.org",
+      "repo": "applications/manjaro-settings-manager"
+    },
+    "mhwd": {
+      "host": "code.manjaro.org",
+      "repo": "applications/mhwd"
     }
   },
   "github": {
@@ -111,6 +121,10 @@
       "host": "gitlab.archlinux.org",
       "repo": "archlinux/packaging/packages/archlinux-appstream-data"
     },
+    "buildbox": {
+      "host": "gitlab.com",
+      "repo": "BuildGrid/buildbox/buildbox"
+    },
     "calligra": {
       "host": "invent.kde.org",
       "repo": "office/calligra"
@@ -191,14 +205,6 @@
       "host": "invent.kde.org",
       "repo": "multimedia/k3b"
     },
-    "syndication": {
-      "host": "invent.kde.org",
-      "repo": "frameworks/syndication"
-    },    
-    "syntax-highlighting": {
-      "host": "invent.kde.org",
-      "repo": "frameworks/syntax-highlighting"
-    },        
     "kactivitymanagerd": {
       "host": "invent.kde.org",
       "repo": "plasma/kactivitymanagerd"
@@ -211,14 +217,6 @@
       "host": "invent.kde.org",
       "repo": "frameworks/kcontacts"
     },
-    "qca-qt5": {
-      "host": "invent.kde.org",
-      "repo": "libraries/qca"
-    },    
-    "qca-qt6": {
-      "host": "invent.kde.org",
-      "repo": "libraries/qca"
-    },  
     "kde-cli-tools": {
       "host": "invent.kde.org",
       "repo": "plasma/kde-cli-tools"
@@ -299,8 +297,6 @@
       "host": "gitlab.manjaro.org",
       "repo": "profiles-and-settings/manjaro-kde-settings"
     },
-
-
     "mousepad": {
       "host": "gitlab.xfce.org",
       "repo": "apps/mousepad"
@@ -341,6 +337,14 @@
       "host": "gitlab.freedesktop.org",
       "repo": "plymouth/plymouth"
     },
+    "qca-qt5": {
+      "host": "invent.kde.org",
+      "repo": "libraries/qca"
+    },
+    "qca-qt6": {
+      "host": "invent.kde.org",
+      "repo": "libraries/qca"
+    },
     "qemu-base": {
       "host": "gitlab.com",
       "repo": "qemu-project/qemu"
@@ -357,13 +361,13 @@
       "host": "invent.kde.org",
       "repo": "office/skrooge"
     },
-    "sonnet": {
-      "host": "invent.kde.org",
-      "repo": "frameworks/sonnet"
-    },    
     "smb4k": {
       "host": "invent.kde.org",
       "repo": "network/smb4k"
+    },
+    "sonnet": {
+      "host": "invent.kde.org",
+      "repo": "frameworks/sonnet"
     },
     "spectacle": {
       "host": "invent.kde.org",
@@ -381,6 +385,14 @@
       "host": "gitlab.freedesktop.org",
       "repo": "spice/spice-protocol"
     },
+    "syndication": {
+      "host": "invent.kde.org",
+      "repo": "frameworks/syndication"
+    },
+    "syntax-highlighting": {
+      "host": "invent.kde.org",
+      "repo": "frameworks/syntax-highlighting"
+    },
     "wine": {
       "host": "gitlab.winehq.org",
       "repo": "wine/wine"
@@ -393,21 +405,11 @@
       "host": "gitlab.com",
       "repo": "wireshark/wireshark"
     },
-    "buildbox": {
-      "host": "gitlab.com",
-      "repo": "BuildGrid/buildbox/buildbox"
-    },    
     "xdg-desktop-portal-kde": {
       "host": "invent.kde.org",
       "repo": "plasma/xdg-desktop-portal-kde"
     }
   },
-  "forgejo": {
-  "manjaro-settings-manager": { 
-    "host": "code.manjaro.org",
-    "repo": "applications/manjaro-settings-manager" }
-  },
-  
   "release_pages": {
     "blender": "https://www.blender.org/download/releases",
     "chromium": "https://chromereleases.googleblog.com/search/label/Stable%20updates",
@@ -432,5 +434,5 @@
     "virtualbox": "https://www.virtualbox.org/wiki/Changelog",
     "vlc": "https://www.videolan.org/vlc/releases/"
   },
-  "total_packages": 170
+  "total_packages": 177
 }
