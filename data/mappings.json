@@ -32,6 +32,18 @@
       "host": "code.manjaro.org",
       "repo": "applications/manjaro-settings-manager"
     },
+     "manjaro-gnome-settings": {
+      "host": "code.manjaro.org",
+      "repo": "profiles/manjaro-gnome-settings"
+    },
+    "manjaro-kde-settings": {
+      "host": "code.manjaro.org",
+      "repo": "profiles/manjaro-kde-settings"
+    },
+    "pacman-mirrors": {
+      "host": "code.manjaro.org",
+      "repo": "applications/pacman-mirrors"
+    },    
     "mhwd": {
       "host": "code.manjaro.org",
       "repo": "applications/mhwd"
@@ -289,14 +301,6 @@
       "host": "gitlab.gnome.org",
       "repo": "GNOME/libadwaita"
     },
-    "manjaro-gnome-settings": {
-      "host": "gitlab.manjaro.org",
-      "repo": "profiles-and-settings/manjaro-gnome-settings"
-    },
-    "manjaro-kde-settings": {
-      "host": "gitlab.manjaro.org",
-      "repo": "profiles-and-settings/manjaro-kde-settings"
-    },
     "mousepad": {
       "host": "gitlab.xfce.org",
       "repo": "apps/mousepad"
@@ -316,10 +320,6 @@
     "orca": {
       "host": "gitlab.gnome.org",
       "repo": "GNOME/orca"
-    },
-    "pacman-mirrors": {
-      "host": "gitlab.manjaro.org",
-      "repo": "applications/pacman-mirrors"
     },
     "pango": {
       "host": "gitlab.gnome.org",
