@@ -408,6 +408,12 @@
       "repo": "plasma/xdg-desktop-portal-kde"
     }
   },
+  "forgejo": {
+  "manjaro-settings-manager": { 
+    "host": "code.manjaro.org",
+    "repo": "applications/manjaro-settings-manager" }
+  },
+  
   "release_pages": {
     "blender": "https://www.blender.org/download/releases",
     "chromium": "https://chromereleases.googleblog.com/search/label/Stable%20updates",
