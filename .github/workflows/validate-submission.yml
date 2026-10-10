@@ -38,7 +38,7 @@ jobs:
                   if key not in submission:
                       errors.append(f"Missing required field: '{key}'")
 
-              valid_sections = ('github', 'gitlab', 'custom', 'release_pages')
+              valid_sections = ('github', 'gitlab', 'forgejo', 'custom', 'release_pages')
               section = submission.get('type')
               if section is not None and section not in valid_sections:
                   errors.append(f"'type' must be one of {valid_sections}, got '{section}'")
@@ -49,10 +49,12 @@ jobs:
               if section == 'github' and isinstance(value, str):
                   if value.startswith('http') or value.endswith('/') or value.endswith('.git'):
                       notes.append(f"github value '{value}' will be auto-normalized to a clean owner/repo before merging")
-              if section == 'gitlab' and isinstance(value, dict):
-                  host, repo = value.get('host', ''), value.get('repo', '')
+              if section in ('gitlab', 'forgejo') and isinstance(value, dict):
+                  host, repo = str(value.get('host', '')), str(value.get('repo', ''))
                   if host.startswith('http') or host.endswith('/') or repo.endswith('/') or repo.endswith('.git'):
-                      notes.append("gitlab host/repo will be auto-normalized (protocol/trailing slashes stripped) before merging")
+                      notes.append(f"{section} host/repo will be auto-normalized (protocol/trailing slashes stripped) before merging")
+                  if section == 'forgejo' and repo.strip('/').count('/') > 1:
+                      notes.append("forgejo repo will be shortened to owner/repo before merging")
 
           with open('/tmp/errors.txt', 'w') as f:
               f.write('\n'.join(errors))

@@ -76,7 +76,7 @@ jobs:
           section = str(submission['type']).strip().lower()
           value = submission['value']
 
-          valid_sections = ('github', 'gitlab', 'custom', 'release_pages')
+          valid_sections = ('github', 'gitlab', 'forgejo', 'custom', 'release_pages')
           if section not in valid_sections:
               print(f"ERROR: Unknown type '{section}'. Must be one of {valid_sections}")
               sys.exit(1)
@@ -103,20 +103,33 @@ jobs:
 
           if section == 'github' and isinstance(value, str):
               value = normalize_github_repo(value)
-          elif section == 'gitlab' and isinstance(value, dict):
+          elif section in ('gitlab', 'forgejo') and isinstance(value, dict):
               if 'host' in value and isinstance(value['host'], str):
                   value['host'] = normalize_gitlab_host(value['host'])
               if 'repo' in value and isinstance(value['repo'], str):
                   value['repo'] = normalize_gitlab_repo(value['repo'])
+                  if section == 'forgejo':
+                      # Forgejo/Gitea repos are always owner/repo: drop /releases, /tags, ...
+                      value['repo'] = '/'.join(value['repo'].split('/')[:2])
 
           # Type-specific shape validation, matching mappings.json's schema
           if section == 'github':
               if not isinstance(value, str) or '/' not in value:
                   print("ERROR: 'github' value must be an 'owner/repo' string")
                   sys.exit(1)
-          elif section == 'gitlab':
+          elif section in ('gitlab', 'forgejo'):
               if not isinstance(value, dict) or 'host' not in value or 'repo' not in value:
-                  print("ERROR: 'gitlab' value must be an object with 'host' and 'repo'")
+                  print(f"ERROR: '{section}' value must be an object with 'host' and 'repo'")
+                  sys.exit(1)
+              # Plain values only: they end up inside request URLs in the app
+              host, repo = str(value['host']), str(value['repo'])
+              if not re.fullmatch(r'[A-Za-z0-9.-]+(:\d+)?', host):
+                  print(f"ERROR: '{section}' host must be a plain domain name, got {host!r}")
+                  sys.exit(1)
+              repo_re = (r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+' if section == 'forgejo'
+                         else r'[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+')
+              if not re.fullmatch(repo_re, repo) or any(s in ('.', '..') for s in repo.split('/')):
+                  print(f"ERROR: '{section}' repo must look like owner/repo, got {repo!r}")
                   sys.exit(1)
           elif section == 'release_pages':
               if not isinstance(value, str):
@@ -212,5 +225,5 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: '❌ **Failed to process this submission.**\n\nPlease check the JSON block in the issue body. It must contain `package_name`, `type` (one of `github`, `gitlab`, `custom`, `release_pages`), and `value` in the shape that section expects.'
+              body: '❌ **Failed to process this submission.**\n\nPlease check the JSON block in the issue body. It must contain `package_name`, `type` (one of `github`, `gitlab`, `forgejo`, `custom`, `release_pages`), and `value` in the shape that section expects.'
             });
