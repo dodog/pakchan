@@ -41,9 +41,23 @@ body:
       placeholder: GNOME/gimp
 
   - type: input
+    id: forgejo_host
+    attributes:
+      label: Forgejo / Gitea / Codeberg Host (if applicable)
+      description: Domain only — no https:// and no trailing slash
+      placeholder: codeberg.org
+
+  - type: input
+    id: forgejo_repo
+    attributes:
+      label: Forgejo / Gitea Repository (if applicable)
+      description: owner/repo format — no trailing slash
+      placeholder: applications/manjaro-settings-manager
+
+  - type: input
     id: release_notes_url
     attributes:
-      label: Release Notes / Text File URL (if no GitHub/GitLab source)
+      label: Release Notes / Text File URL
       description: Direct link to a changelog, release notes page, or plain text changelog file
       placeholder: https://example.com/releases
 
