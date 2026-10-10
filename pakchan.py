@@ -178,24 +178,9 @@ def run(cmd: list, timeout: int = 30) -> tuple:
         return "", "timeout", 1
 
 
-_GIT_SAFE_OPTS = ["-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
-                  "-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=10",
-                  "-c", "credential.helper="]
-
-
-def run_git(cmd: list, timeout: float = 10) -> tuple:
-    ctx = _ctx()
-    if ctx is not None:
-        left = ctx.deadline - time.monotonic()
-        if left <= 0:
-            ctx.incomplete = True
-            raise FetchBudgetExceeded()
-        timeout = min(timeout, left)
-    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_CONFIG_NOSYSTEM="1",
-               GIT_CONFIG_GLOBAL="/dev/null", LC_ALL="C")
-    full = [cmd[0], *_GIT_SAFE_OPTS, *cmd[1:]]
+def _run_group(cmd: list, timeout: float = 30, env: Optional[dict] = None) -> tuple:
     try:
-        p = subprocess.Popen(full, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              stdin=subprocess.DEVNULL, text=True, errors="replace",
                              env=env, start_new_session=True)
     except FileNotFoundError:
@@ -213,6 +198,24 @@ def run_git(cmd: list, timeout: float = 10) -> tuple:
             pass
         return "", "timeout", 1
     return out.strip(), err.strip(), p.returncode
+
+
+_GIT_SAFE_OPTS = ["-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
+                  "-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=10",
+                  "-c", "credential.helper="]
+
+
+def run_git(cmd: list, timeout: float = 10) -> tuple:
+    ctx = _ctx()
+    if ctx is not None:
+        left = ctx.deadline - time.monotonic()
+        if left <= 0:
+            ctx.incomplete = True
+            raise FetchBudgetExceeded()
+        timeout = min(timeout, left)
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_CONFIG_NOSYSTEM="1",
+               GIT_CONFIG_GLOBAL="/dev/null", LC_ALL="C")
+    return _run_group([cmd[0], *_GIT_SAFE_OPTS, *cmd[1:]], timeout, env)
 
 
 # ─── Debug tracing ────────────────────────────────────────────────────────────
@@ -236,7 +239,7 @@ def _dbg_get() -> list[str]:
 
 
 # ─── Network / input hardening ────────────────────────────────────────────────
-import http.client, ipaddress, signal, socket, zlib
+import errno, http.client, ipaddress, signal, socket, zlib
 
 _MAX_HTTP_BYTES     = 8 * 1024 * 1024
 _MAX_AUR_GZ_BYTES   = 128 * 1024 * 1024
@@ -292,11 +295,12 @@ class FetchBudgetExceeded(Exception):
 
 
 class _FetchCtx:
-    __slots__ = ("deadline", "incomplete")
+    __slots__ = ("deadline", "incomplete", "failed")
 
     def __init__(self, seconds: float):
         self.deadline = time.monotonic() + seconds
         self.incomplete = False
+        self.failed: dict[str, str] = {}
 
 
 _budget_local = threading.local()
@@ -321,6 +325,70 @@ def _note_incomplete() -> None:
         c.incomplete = True
 
 
+# What the OS reports (Gio.NetworkMonitor)
+_NET_AVAILABLE: Optional[bool] = None
+_UNREACHABLE_ERRNOS = {errno.ENETUNREACH, errno.ENETDOWN, errno.EHOSTUNREACH}
+
+
+def _set_network_available(v: bool) -> None:
+    global _NET_AVAILABLE
+    _NET_AVAILABLE = v
+
+
+def _error_kind(exc) -> str:
+    """dns | unreachable | refused | timeout | error"""
+    reason = getattr(exc, "reason", exc)
+    if isinstance(reason, socket.gaierror):
+        return "unreachable" if reason.errno == socket.EAI_AGAIN else "dns"
+    if getattr(reason, "errno", None) in _UNREACHABLE_ERRNOS:
+        return "unreachable"
+    if isinstance(reason, ConnectionRefusedError):
+        return "refused"
+    if isinstance(reason, (TimeoutError, socket.timeout)):
+        return "timeout"
+    return "error"
+
+
+def _note_failed(host: str, kind: Optional[str]) -> None:
+    c = _ctx()
+    if c is None:
+        return
+    c.incomplete = True
+    if kind is None or kind == "skipped":
+        c.failed.setdefault(host, kind or "error")   # never overwrite the real cause
+    else:
+        c.failed[host] = kind
+
+
+def _looks_offline(failed: dict) -> bool:
+    """Is the problem our connection rather than the sites?"""
+    if _NET_AVAILABLE is False:
+        return True
+    kinds = {k for k in failed.values() if k != "skipped"}
+    return (bool(kinds) and kinds <= {"dns", "unreachable"}
+            and (len(failed) >= 2 or "unreachable" in kinds))
+
+
+def _incomplete_error(failed: dict) -> dict:
+    """Error result for a lookup that could not be completed, saying whether it looks
+    like our connection or the sites."""
+    offline = _looks_offline(failed)
+    hosts = sorted(failed)
+    shown = ", ".join(hosts[:3]) + (f" and {len(hosts) - 3} more" if len(hosts) > 3 else "")
+    if offline:
+        msg = "No network connection. Connect and press Retry."
+    elif failed and set(failed.values()) == {"ratelimit"}:
+        msg = f"Request limit reached on {shown}. Retry later."
+    elif failed:
+        msg = (f"Couldn't reach {shown}, so no changelog could be confirmed. "
+               "The site may be down or blocked; retry in a few minutes.")
+    else:
+        msg = ("Some sources didn't answer in time, so no changelog could be "
+               "confirmed. Retry in a few minutes.")
+    return {"versions": [], "source": "error", "_incomplete": True,
+            "_offline": offline, "error": msg}
+
+
 _host_lock = threading.Lock()
 _host_down_until: dict[str, float] = {}
 _host_fails: dict[str, tuple[int, float]] = {}
@@ -337,11 +405,17 @@ def _host_is_down(host: str) -> bool:
         return False
 
 
-def _mark_host_down(host: str, secs: float, why: str) -> None:
+def _reset_host_state() -> None:
+    with _host_lock:
+        _host_down_until.clear()
+        _host_fails.clear()
+
+
+def _mark_host_down(host: str, secs: float, why: str, kind: Optional[str] = None) -> None:
     with _host_lock:
         _host_down_until[host] = time.monotonic() + secs
         _host_fails.pop(host, None)
-    _note_incomplete()
+    _note_failed(host, kind)
     _dbg(f"[net] {host}: {why} — skipping it for {int(secs)} s")
 
 
@@ -352,9 +426,9 @@ def _note_host_ok(host: str) -> None:
 
 def _note_net_failure(host: str, exc: BaseException) -> None:
     """Timeouts, resets, TLS errors, 502/503/504."""
-    _note_incomplete()
-    reason = getattr(exc, "reason", exc)
-    weight = 2 if isinstance(reason, (ConnectionRefusedError, socket.gaierror)) else 1
+    kind = _error_kind(exc)
+    _note_failed(host, kind)
+    weight = 2 if kind in ("dns", "unreachable", "refused") else 1
     now = time.monotonic()
     with _host_lock:
         n, last = _host_fails.get(host, (0, 0.0))
@@ -383,7 +457,8 @@ def _note_http_status(host: str, resp) -> None:
             secs = int(retry)
         elif reset and reset.isdigit():
             secs = int(reset) - int(time.time())
-        _mark_host_down(host, max(60, min(secs, 3600)), f"rate limited (HTTP {status})")
+        _mark_host_down(host, max(60, min(secs, 3600)),
+                        f"rate limited (HTTP {status})", kind="ratelimit")
     elif status in (502, 503, 504):
         _note_net_failure(host, OSError(f"HTTP {status}"))
     else:
@@ -394,7 +469,7 @@ def _guard_request(req) -> str:
     _check_request_url(req)
     host = (urllib.parse.urlsplit(req.full_url).hostname or "").lower()
     if _host_is_down(host):
-        _note_incomplete()
+        _note_failed(host, "skipped")
         raise urllib.error.URLError(f"{host} is temporarily marked unavailable")
     ctx = _ctx()
     req._pk_clamped = False
@@ -405,7 +480,7 @@ def _guard_request(req) -> str:
             raise FetchBudgetExceeded()
         t = req.timeout if isinstance(req.timeout, (int, float)) else _REQ_TIMEOUT_CAP
         t = min(t, _REQ_TIMEOUT_CAP)
-        req._pk_clamped = left < t 
+        req._pk_clamped = left < t
         req.timeout = max(1.0, min(t, left))
     return host
 
@@ -692,101 +767,117 @@ def _read_sync_db() -> tuple[set, dict, bool]:
 
 # ─── Update detection ─────────────────────────────────────────────────────────
 
-def _pending_pacman_updates_from_sync(local_db: dict) -> dict:
-    """Fallback update detection for when pacman-contrib's checkupdates is unavailable."""
-    if not PACMAN_SYNC.exists() or not cmd_exists("vercmp"):
+def _updates_from_versions(avail: dict, installed: dict) -> dict:
+    if not cmd_exists("vercmp"):
         return {}
-
-    sync_versions: dict[str, str] = {}
-    for db_path in PACMAN_SYNC.glob("*.db"):
-        try:
-            with tarfile.open(db_path, "r:gz") as tf:
-                for member in tf.getmembers():
-                    if not member.name.endswith("/desc"):
-                        continue
-                    f = tf.extractfile(member)
-                    if not f:
-                        continue
-                    text = f.read().decode("utf-8", errors="replace")
-                    name = version = ""
-                    cur = None
-                    for line in text.splitlines():
-                        line = line.strip()
-                        if line == "%NAME%":
-                            cur = "name"; continue
-                        if line == "%VERSION%":
-                            cur = "version"; continue
-                        if line.startswith("%") and line.endswith("%"):
-                            cur = None; continue
-                        if cur == "name" and not name:
-                            name = line
-                        elif cur == "version" and not version:
-                            version = line
-                    if name and version:
-                        sync_versions[name] = version
-        except Exception:
-            continue
-
     result: dict[str, str] = {}
-    for name, sync_ver in sync_versions.items():
-        local_info = local_db.get(name)
-        if not local_info:
-            continue
-        local_ver = local_info.get("version", "")
-        # Identical strings can never be an update
-        if not local_ver or local_ver == sync_ver:
-            continue
-        out, _, rc = run(["vercmp", sync_ver, local_ver], timeout=5)
-        if rc == 0 and out.strip():
-            try:
-                if int(out.strip()) > 0:
-                    result[name] = sync_ver
-            except ValueError:
-                pass
+    for name, cur in installed.items():
+        new = avail.get(name)
+        if not new or new == "?" or not cur or new == cur:
+            continue            # identical strings can never be an update
+        out, _, rc = run(["vercmp", new, cur], timeout=5)
+        try:
+            if rc == 0 and int(out.strip()) > 0:
+                result[name] = new
+        except ValueError:
+            pass
     return result
 
 
-def _pending_pacman_updates(local_db: Optional[dict] = None) -> dict:
-    out, _, rc = run(["checkupdates"], timeout=45)
-    result = {}
+def _parse_update_lines(out: str) -> dict:
+    """'name old -> new' lines (checkupdates, yay/paru -Qua)."""
+    result: dict[str, str] = {}
+    for line in out.splitlines():
+        p = line.split()
+        if len(p) >= 4:
+            result[p[0]] = p[3]
+    return result
+
+
+def _parse_flatpak_updates(out: str) -> dict:
+    result: dict[str, str] = {}
+    for line in out.splitlines():
+        p = line.split()
+        if p and "." in p[0]:
+            result[p[0]] = p[1] if len(p) > 1 else "latest"
+    return result
+
+
+_FLATPAK_LS_UPDATES = ["flatpak", "remote-ls", "--updates", "--columns=application,version"]
+
+
+def _pending_flatpak_updates_cached() -> dict:
+    """Flatpak updates according to the local cache (no network, may be stale)."""
+    out, _, rc = _run_group(_FLATPAK_LS_UPDATES[:3] + ["--cached"] + _FLATPAK_LS_UPDATES[3:],
+                            timeout=8)
+    return _parse_flatpak_updates(out) if rc == 0 else {}
+
+
+def _pending_pacman_updates_online() -> Optional[dict]:
+    """checkupdates syncs a private copy of the databases from the mirrors."""
+    if not cmd_exists("checkupdates"):
+        return None
+    out, _, rc = _run_group(["checkupdates"], timeout=40)
     if rc == 0 and out:
-        for line in out.splitlines():
-            p = line.split()
-            if len(p) >= 4:
-                result[p[0]] = p[3]
-    if result or local_db is None:
-        return result
-    # Cross-check checkupdates' empty result against the synced databases
-    return _pending_pacman_updates_from_sync(local_db)
+        return _parse_update_lines(out)
+    if rc == 2 and not out:          # checkupdates: "no updates available"
+        return {}
+    return None
 
 
-def _pending_aur_updates(helper: str) -> dict:
+def _pending_aur_updates_online(helper: str) -> Optional[dict]:
     """Fix #10: use correct flags per helper."""
-    if helper == "yay":
-        cmd = ["yay", "-Qua", "--aur"]
-    else:  # paru and others
-        cmd = [helper, "-Qua"]
-    out, _, rc = run(cmd, timeout=60)
-    result = {}
-    if rc == 0 and out:
-        for line in out.splitlines():
-            p = line.split()
-            if len(p) >= 4:
-                result[p[0]] = p[3]
-    return result
+    cmd = ["yay", "-Qua", "--aur"] if helper == "yay" else [helper, "-Qua"]
+    out, err, rc = _run_group(cmd, timeout=45)
+    if rc == 0:
+        return _parse_update_lines(out)
+    if rc == 1 and not out and not err:   # pacman convention: nothing to update
+        return {}
+    return None
 
 
-def _pending_flatpak_updates() -> dict:
-    out, _, rc = run(
-        ["flatpak", "remote-ls", "--updates", "--columns=application,version"],
-        timeout=20)
-    result = {}
-    if rc == 0 and out:
-        for line in out.splitlines():
-            p = line.split()
-            if p and "." in p[0]:
-                result[p[0]] = p[1] if len(p) > 1 else "latest"
-    return result
+def _pending_flatpak_updates_online() -> Optional[dict]:
+    if not cmd_exists("flatpak"):
+        return None
+    out, _, rc = _run_group(_FLATPAK_LS_UPDATES, timeout=20)
+    return _parse_flatpak_updates(out) if rc == 0 else None
+
+
+def check_updates_online(aur_helper: Optional[str]) -> dict:
+    """Run the online checks in parallel. {"pacman"|"aur"|"flatpak": dict | None}."""
+    jobs = {"pacman": _pending_pacman_updates_online}
+    if aur_helper:
+        jobs["aur"] = lambda: _pending_aur_updates_online(aur_helper)
+    if cmd_exists("flatpak"):
+        jobs["flatpak"] = _pending_flatpak_updates_online
+
+    def _safe(fn):
+        try:
+            return fn()
+        except Exception:
+            return None
+
+    with ThreadPoolExecutor(max_workers=len(jobs)) as ex:
+        futs = {k: ex.submit(_safe, fn) for k, fn in jobs.items()}
+        return {k: f.result() for k, f in futs.items()}
+
+
+def _apply_updates(pkgs: list, results: dict) -> tuple:
+    """Merge online results into the package list.
+    Returns (number of packages whose update info changed, names of failed checks)."""
+    changed, failed = 0, []
+    for repo, mapping in results.items():
+        if mapping is None:
+            failed.append(repo)
+            continue
+        for p in pkgs:
+            if p.repo != repo or not p.installed:
+                continue
+            new = mapping.get(p.name, "")
+            if new != p.new_version:
+                p.new_version = new
+                changed += 1
+    return changed, failed
 
 
 def _installed_flatpak_versions() -> dict:
@@ -901,15 +992,17 @@ def _desktop_entries_info() -> dict[str, tuple[str, str]]:
 
 
 def _load_pacman_aur(local_db: dict, sync_names: set,
-                     aur_helper: Optional[str]) -> tuple[list, dict, dict]:
+                     aur_helper: Optional[str], sync_full: Optional[dict] = None
+                     ) -> tuple[list, dict, dict]:
     """Returns (packages, pacman_pending, aur_pending)."""
-    with ThreadPoolExecutor(max_workers=2) as ex:
-        f_pac = ex.submit(_pending_pacman_updates, local_db)
-        f_aur = ex.submit(_pending_aur_updates, aur_helper) if aur_helper else None
-        f_gui = ex.submit(_desktop_entries_info)
-        pacman_pending  = f_pac.result()
-        aur_pending     = f_aur.result() if f_aur else {}
-        desktop_info    = f_gui.result()
+    installed = {n: i.get("version", "") for n, i in local_db.items()}
+    pacman_pending = _updates_from_versions(
+        {n: i.get("version", "") for n, i in (sync_full or {}).items()},
+        {n: v for n, v in installed.items() if n in sync_names})
+    aur_pending = _updates_from_versions(
+        {n: i.get("version", "") for n, i in KNOWN_AUR_META.items()},
+        {n: v for n, v in installed.items() if n not in sync_names})
+    desktop_info = _desktop_entries_info()
 
     pkgs = []
     for name, info in sorted(local_db.items()):
@@ -947,7 +1040,7 @@ def _load_pacman_aur(local_db: dict, sync_names: set,
 def _load_flatpak() -> list:
     if not cmd_exists("flatpak"):
         return []
-    fp_pending  = _pending_flatpak_updates()
+    fp_pending  = _pending_flatpak_updates_cached()   # local cache only; online check follows
     fp_versions = _installed_flatpak_versions()
     lang        = _preferred_lang_code()
     flatpak_dirs = [d for d in [
@@ -1057,7 +1150,7 @@ def get_all_packages_fast() -> tuple[list, dict, bool]:
         (h for h in ["yay", "paru"] if cmd_exists(h)), None)
 
     with ThreadPoolExecutor(max_workers=3) as ex:
-        f_pacaur  = ex.submit(_load_pacman_aur, local_db, sync_names, aur_helper)
+        f_pacaur  = ex.submit(_load_pacman_aur, local_db, sync_names, aur_helper, sync_full)
         f_flatpak = ex.submit(_load_flatpak)
         f_snap    = ex.submit(_load_snap)
         pacaur_pkgs, _, _ = f_pacaur.result()
@@ -2562,7 +2655,7 @@ def _gitlab_git_fallback(host: str, repo: str, _pkg_name: str) -> Optional[dict]
         _note_incomplete()
         return None
     repo_url = f"https://{host}/{repo}.git"
-    git_deadline = time.monotonic() + _GIT_BUDGET_S
+    git_deadline = time.monotonic() + _GIT_BUDGET_S      # whole git phase, not per call
 
     def _t(cap: float) -> float:
         return max(1.0, min(cap, git_deadline - time.monotonic()))
@@ -2600,7 +2693,7 @@ def _gitlab_git_fallback(host: str, repo: str, _pkg_name: str) -> Optional[dict]
         if run_git(git + ["remote", "add", "origin", repo_url], timeout=_t(5))[2] != 0:
             return None
 
-        # One fetch for all tags
+        # ONE fetch for all tags
         refspecs = [f"refs/tags/{t}:refs/tags/{t}" for t, _ in tags]
         _, ferr, frc = run_git(git + ["fetch", "--quiet", "--depth", "1", "--no-tags",
                                       "--filter=blob:none", "origin", *refspecs],
@@ -3251,13 +3344,11 @@ def fetch_changelog(pkg: Package) -> dict:
         # A source timed out, was rate-limited or was skipped.
         result["_incomplete"] = True
         if result.get("source") == "unavailable":
-            result = {"versions": [], "source": "error", "_incomplete": True,
-                      "error": "Some sources did not respond in time, so no changelog "
-                               "could be confirmed. Retry in a few minutes."}
+            result = _incomplete_error(ctx.failed)
     real = (bool(result.get("versions")) and not result.get("_link_only")
             and result.get("source") != "unavailable")
     if result.get("versions") and (real or not ctx.incomplete):
-        _cl_cache_set(key, dict(result)) 
+        _cl_cache_set(key, dict(result))
     result["_debug"] = debug_trace
     return result
 
@@ -3322,6 +3413,9 @@ class PakchanWindow(Adw.ApplicationWindow):
         self.selected_pkg:  Optional[Package] = None
         self._cl_inflight:     set[str] = set()
         self._enrich_inflight: set[str] = set()
+        self._update_status  = ""
+        self._update_busy    = False
+        self._update_pending = False
         self.current_tab    = "changelog"
         self.current_filter = "installed"
         self.current_sort   = SORT_OPTIONS[0]
@@ -3332,6 +3426,13 @@ class PakchanWindow(Adw.ApplicationWindow):
         self.search_extra_results: list[Package]    = []
 
         self._build_ui()
+        # Network state
+        try:
+            _mon = Gio.NetworkMonitor.get_default()
+            _set_network_available(_mon.get_network_available())
+            _mon.connect("network-changed", self._on_network_changed)
+        except Exception:
+            pass
         self._load_packages()
 
     # ── CSS ───────────────────────────────────────────────────────────────────
@@ -4176,6 +4277,8 @@ class PakchanWindow(Adw.ApplicationWindow):
             self.footer.set_text(
                 f"{flt.title()}: {src_count} installed"
                 + (f" · {src_upd} with updates" if src_upd else ""))
+        if self._update_status:
+            self.footer.set_text(f"{self.footer.get_text()} · {self._update_status}")
 
     # ── Loading ───────────────────────────────────────────────────────────────
 
@@ -4211,6 +4314,64 @@ class PakchanWindow(Adw.ApplicationWindow):
         # Fix #1: refresh mappings in background after UI is shown
         _refresh_mappings_bg()
         _refresh_aur_meta_bg()
+        self._start_update_check()
+        return False
+
+    # ── Online update check (second phase of loading) ─────────────────────────
+
+    def _start_update_check(self):
+        """Uupdate info from local data; online check (mirrors, AUR, Flathub) runs in the background and refines it."""
+        if self._update_busy:
+            self._update_pending = True
+            return
+        self._update_busy   = True
+        self._update_status = "checking for newer updates…"
+        self._update_footer()
+        helper = next((h for h in ["yay", "paru"] if cmd_exists(h)), None)
+        threading.Thread(target=self._bg_updates, args=(helper,), daemon=True).start()
+
+    def _on_network_changed(self, _monitor, available):
+        """When the connection returns: forget skipped hosts, drop lookups that failed
+        only because we were offline, and retry what is on screen."""
+        _set_network_available(bool(available))
+        if not available:
+            return
+        _reset_host_state()
+        for p in self.all_packages:
+            if p.changelog and p.changelog.get("_incomplete"):
+                p.changelog = None
+        if self.selected_pkg is not None and self.current_tab == "changelog":
+            self._render_detail()          # starts a fresh lookup for dropped results
+        if self._update_status.startswith(("offline", "couldn't")):
+            self._start_update_check()
+
+    def _bg_updates(self, helper):
+        try:
+            results = check_updates_online(helper)
+        except Exception:
+            results = {}
+        GLib.idle_add(self._on_updates_checked, results)
+
+    def _on_updates_checked(self, results: dict):
+        self._update_busy = False
+        changed, failed = _apply_updates(self.all_packages, results)
+        labels = {"pacman": "Pacman", "aur": "AUR", "flatpak": "Flatpak"}
+        stamp  = datetime.now().strftime("%H:%M")
+        if not results or len(failed) == len(results):
+            self._update_status = (("offline" if _NET_AVAILABLE is False else "couldn't check online")
+                                   + " — showing results from the last sync")
+        elif failed:
+            self._update_status = (f"updates checked {stamp} "
+                                   f"({', '.join(labels.get(f, f) for f in failed)} unavailable)")
+        else:
+            self._update_status = f"updates checked {stamp}"
+        if changed and not self.search.get_text().strip():
+            self._populate_list()            # also refreshes counts and footer
+        else:
+            self._update_footer()
+        if self._update_pending:
+            self._update_pending = False
+            self._start_update_check()
         return False
 
     # ── Events ────────────────────────────────────────────────────────────────
@@ -4456,6 +4617,7 @@ class PakchanWindow(Adw.ApplicationWindow):
             lbl = Gtk.Label(label="Fetching changelog…")
             lbl.add_css_class("dim-label"); lbl.set_halign(Gtk.Align.CENTER)
             self.d_box.append(lbl)
+            # One fetch per package
             if pkg.cl_key not in self._cl_inflight:
                 self._cl_inflight.add(pkg.cl_key)
                 threading.Thread(target=self._bg_cl, args=(pkg,), daemon=True).start()
