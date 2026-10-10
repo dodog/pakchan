@@ -299,10 +299,7 @@
       "host": "gitlab.manjaro.org",
       "repo": "profiles-and-settings/manjaro-kde-settings"
     },
-    "manjaro-settings-manager": {
-      "host": "gitlab.manjaro.org",
-      "repo": "applications/manjaro-settings-manager"
-    },
+
     "mhwd": {
       "host": "gitlab.manjaro.org",
       "repo": "applications/mhwd"
