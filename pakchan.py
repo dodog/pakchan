@@ -3530,13 +3530,29 @@ def fetch_changelog_snap(pkg: Package) -> dict:
             "_manual_check_url": fallback_url}
 
 
+def _cache_usable(cached: dict, target: str) -> bool:
+    if cached.get("_stale"):
+        return False                            # older than CL_MAX_AGE_S
+    looked_up_for = cached.get("_target")
+    if looked_up_for is not None:
+        return looked_up_for == target          # package updated or a new update appeared
+    if str(cached.get("source", "")).startswith("Local AppStream") \
+            and not cached.get("_version_mismatch"):
+        return _target_version_satisfied(cached.get("versions") or [], target)
+    return True
+
+
 def fetch_changelog(pkg: Package) -> dict:
     """Fix #6/#11: keyed by repo:name, respects expiry."""
     key    = pkg.cl_key
-    cached = _cl_cache_get(key)
-    if cached and not cached.get("_stale"):
+    target = pkg.new_version or pkg.version
+    entry  = _cl_cache_get(key)
+    cached = dict(entry) if entry else None
+    if cached and _cache_usable(cached, target):
         cached["_from_cache"] = True
         return cached
+    if cached and not cached.get("_stale"):
+        cached["_version_mismatch"] = True
 
     _dbg_reset()
     ctx = _budget_begin(_FETCH_BUDGET_S)
@@ -3576,11 +3592,18 @@ def fetch_changelog(pkg: Package) -> dict:
         result["_incomplete"] = True
         if result.get("source") == "unavailable":
             result = _incomplete_error(ctx.failed)
+    if cached and not result.get("versions"):
+        # Offline or the sites are down
+        cached["_from_cache"] = True
+        cached["_debug"] = debug_trace
+        return cached
     real = (bool(result.get("versions")) and not result.get("_link_only")
             and result.get("source") != "unavailable"
             and not result.get("_version_mismatch"))
     if result.get("versions") and (real or not ctx.incomplete):
-        _cl_cache_set(key, dict(result))
+        entry = dict(result)
+        entry["_target"] = target
+        _cl_cache_set(key, entry)
     result["_debug"] = debug_trace
     return result
 
