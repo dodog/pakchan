@@ -18,7 +18,8 @@ Run:
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GLib, Gdk, Gio, Pango
+from gi.repository import Gtk, Adw, GLib, Gdk, Gio, GObject, Pango
+from types import SimpleNamespace
 
 # Vte gives us a real embedded terminal
 Vte = None
@@ -3124,6 +3125,14 @@ def _is_noise_line(text: str) -> bool:
     return False
 
 
+def _stale_appstream(r: dict) -> dict:
+    """The installed version's AppStream notes, used when nothing newer could be found."""
+    r["_version_mismatch"] = True
+    r["source"] = (f"{r.get('source') or 'Local AppStream metadata'}"
+                   "  [installed version — may not include the update]")
+    return r
+
+
 def fetch_changelog_pacman(pkg: Package) -> dict:
     # 1. Always check mappings first
     r = _check_mappings_first(pkg)
@@ -3133,15 +3142,22 @@ def fetch_changelog_pacman(pkg: Package) -> dict:
     _dbg("[1] mappings.json: no entry for this package")
 
     # 2. Local AppStream metainfo (fast, on-disk, no network) — desktop apps only
+    target_version = pkg.new_version or pkg.version
+    local_stale = None
     r = _local_appstream_releases(pkg.name)
     if r:
-        _dbg(f"[2] local AppStream: hit ({r.get('source')})")
-        return r
-    _dbg("[2] local AppStream: no usable file")
+        _sort_versions_newest_first(r["versions"])
+        if _target_version_satisfied(r["versions"], target_version):
+            _dbg(f"[2] local AppStream: hit ({r.get('source')})")
+            return r
+        _dbg(f"[2] local AppStream: newest entry {r['versions'][0].get('version')!r} is older "
+             f"than {target_version!r} — keeping it as a fallback, checking upstream")
+        local_stale = r
+    else:
+        _dbg("[2] local AppStream: no usable file")
 
     # Steps 4/5 (known GitLab/GitHub mapping) are skipped here
     name = pkg.name.lower()
-    target_version = pkg.new_version or pkg.version
 
     # 3. Direct GitHub/GitLab URL
     if not pkg.url:
@@ -3213,6 +3229,9 @@ def fetch_changelog_pacman(pkg: Package) -> dict:
     else:
         _dbg("[4] no package URL to scan")
 
+    if local_stale:
+        return _stale_appstream(local_stale)
+
     if fallback_link:
         return {
             "versions": [{"version": pkg.version, "date": "",
@@ -3238,15 +3257,22 @@ def fetch_changelog_aur(pkg: Package) -> dict:
     _dbg("[1] mappings.json: no entry for this package")
 
     # 2. Local AppStream metainfo (fast, on-disk, no network) — desktop apps only
+    target_version = pkg.new_version or pkg.version
+    local_stale = None
     r = _local_appstream_releases(pkg.name)
     if r:
-        _dbg(f"[2] local AppStream: hit ({r.get('source')})")
-        return r
-    _dbg("[2] local AppStream: no usable file")
+        _sort_versions_newest_first(r["versions"])
+        if _target_version_satisfied(r["versions"], target_version):
+            _dbg(f"[2] local AppStream: hit ({r.get('source')})")
+            return r
+        _dbg(f"[2] local AppStream: newest entry {r['versions'][0].get('version')!r} is older "
+             f"than {target_version!r} — keeping it as a fallback, checking upstream")
+        local_stale = r
+    else:
+        _dbg("[2] local AppStream: no usable file")
 
     # Step 4 (known GitLab/GitHub mapping) is skipped here
     name = pkg.name.lower()
-    target_version = pkg.new_version or pkg.version
 
     # 3. Direct GitHub/GitLab URL
     if not pkg.url:
@@ -3314,6 +3340,9 @@ def fetch_changelog_aur(pkg: Package) -> dict:
             _dbg("[4] homepage scan: no repo link found (or rejected by plausibility check)")
     else:
         _dbg("[4] no package URL to scan")
+
+    if local_stale:
+        return _stale_appstream(local_stale)
 
     if fallback_link:
         return {
@@ -3548,7 +3577,8 @@ def fetch_changelog(pkg: Package) -> dict:
         if result.get("source") == "unavailable":
             result = _incomplete_error(ctx.failed)
     real = (bool(result.get("versions")) and not result.get("_link_only")
-            and result.get("source") != "unavailable")
+            and result.get("source") != "unavailable"
+            and not result.get("_version_mismatch"))
     if result.get("versions") and (real or not ctx.incomplete):
         _cl_cache_set(key, dict(result))
     result["_debug"] = debug_trace
@@ -3593,6 +3623,13 @@ POPULAR_AUR_NAMES = [
     "brave-bin", "opera", "insomnia-bin", "android-studio", "dropbox",
     "onlyoffice-bin", "bitwarden",
 ]
+
+
+class PkgItem(GObject.Object):
+
+    def __init__(self, pkg):
+        super().__init__()
+        self.pkg = pkg
 
 
 class PakchanApp(Adw.Application):
@@ -3783,7 +3820,7 @@ class PakchanWindow(Adw.ApplicationWindow):
                 self.search.set_text("")
                 self._do_search()
             else:
-                self.listbox.grab_focus()
+                self.listview.grab_focus()
             return True
         return False
 
@@ -3890,15 +3927,23 @@ class PakchanWindow(Adw.ApplicationWindow):
         sc = Gtk.ScrolledWindow()
         sc.set_vexpand(True)
         sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        self.listbox = Gtk.ListBox()
-        self.listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
-        self.listbox.add_css_class("navigation-sidebar")
-        self.listbox.connect("row-selected", self._on_row_selected)
-        # Keyboard navigation
+        # Virtualized list
+        self.store = Gio.ListStore(item_type=PkgItem)
+        factory = Gtk.SignalListItemFactory()
+        factory.connect("setup",  self._row_setup)
+        factory.connect("bind",   self._row_bind)
+        factory.connect("unbind", self._row_unbind)
+        self.selection = Gtk.SingleSelection(model=self.store)
+        self.selection.set_autoselect(False)
+        self.selection.set_can_unselect(True)
+        self.selection.connect("notify::selected-item", self._on_item_selected)
+        self.listview = Gtk.ListView(model=self.selection, factory=factory)
+        self.listview.add_css_class("navigation-sidebar")
         kc = Gtk.EventControllerKey()
+        kc.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         kc.connect("key-pressed", self._on_list_key)
-        self.listbox.add_controller(kc)
-        sc.set_child(self.listbox)
+        self.listview.add_controller(kc)
+        sc.set_child(self.listview)
 
         self.empty_state = Adw.StatusPage()
         self.empty_state.set_icon_name("system-search-symbolic")
@@ -3985,101 +4030,130 @@ class PakchanWindow(Adw.ApplicationWindow):
         "snap":    "package-x-generic-symbolic",
     }
 
-    def _icon_widget_for(self, pkg: Package) -> Gtk.Image:
+    # ── Package rows ──────────────────────────────────────────────────────────
+
+    def _set_row_icon(self, img: Gtk.Image, pkg: Package):
         """Real app icon (PAMAC-style) when one can be resolved."""
-        img = Gtk.Image()
-        img.set_pixel_size(32)
         name = pkg.icon_name or pkg.name
         if name and self.icon_theme.has_icon(name):
             img.set_from_icon_name(name)
         else:
             img.set_from_icon_name(self._ICON_FALLBACK.get(pkg.repo, "package-x-generic-symbolic"))
-        return img
 
-    def _make_row(self, pkg: Package) -> Gtk.ListBoxRow:
-        row = Gtk.ListBoxRow(); row.pkg = pkg
-        hb  = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+    def _row_setup(self, _factory, list_item):
+        """Build the widgets of one row, once. _row_bind fills them in."""
+        hb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         hb.set_margin_start(8); hb.set_margin_end(8)
         hb.set_margin_top(5);   hb.set_margin_bottom(5)
 
         cb = Gtk.CheckButton()
-        # Re-derive checkbox state from the current filter, don't trust stale flags
-        if not pkg.installed:
-            cb.set_active(pkg.checked)
-        elif self.current_filter == "updates":
-            cb.set_active(pkg.checked and not pkg.marked_remove)
-        else:
-            cb.set_active(pkg.checked and pkg.marked_remove)
-        # Checkbox meaning changes with context
-        if not pkg.installed:
-            cb.set_sensitive(True)
-            cb.set_tooltip_text("Select to install")
-        elif self.current_filter == "updates":
-            cb.set_sensitive(pkg.has_update)
-            cb.set_tooltip_text("Select to update" if pkg.has_update else "")
-        else:
-            cb.set_sensitive(True)
-            cb.set_tooltip_text("Select to uninstall")
-        cb.connect("toggled", self._on_pkg_check, pkg)
+        cb.connect("toggled", self._on_row_check_toggled, hb)
         hb.append(cb)
 
-        # Immediate visual feedback for what the checkbox will do
-        action_icon = Gtk.Image()
-        action_icon.set_pixel_size(16)
-        self._refresh_action_icon(action_icon, pkg)
-        hb.append(action_icon)
-        cb.connect("toggled", self._on_action_icon_refresh, pkg, action_icon)
-
-        hb.append(self._icon_widget_for(pkg))
+        action_icon = Gtk.Image(); action_icon.set_pixel_size(16); hb.append(action_icon)
+        app_icon    = Gtk.Image(); app_icon.set_pixel_size(32);    hb.append(app_icon)
 
         nb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
         nb.set_hexpand(True)
-
         top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        nl  = Gtk.Label(label=pkg.display_name or pkg.name)
-        nl.set_xalign(0); nl.set_ellipsize(Pango.EllipsizeMode.END)
-        nl.add_css_class("heading"); top.append(nl)
-        badge = Gtk.Label(label=pkg.repo)
-        badge.add_css_class(f"badge-{pkg.repo}"); top.append(badge)
-        if pkg.is_dep:
-            dep = Gtk.Label(label="dep"); dep.add_css_class("dep-tag")
-            top.append(dep)
-        if not pkg.installed:
-            tag = Gtk.Label(label="not installed"); tag.add_css_class("dep-tag")
-            top.append(tag)
+        name = Gtk.Label(); name.set_xalign(0); name.set_ellipsize(Pango.EllipsizeMode.END)
+        name.add_css_class("heading"); top.append(name)
+        badge = Gtk.Label(); top.append(badge)
+        dep = Gtk.Label(label="dep"); dep.add_css_class("dep-tag"); top.append(dep)
+        not_inst = Gtk.Label(label="not installed"); not_inst.add_css_class("dep-tag")
+        top.append(not_inst)
         nb.append(top)
 
         vb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        if pkg.installed:
-            vl = Gtk.Label(label=pkg.version)
-            vl.add_css_class("dim-label"); vl.set_xalign(0); vb.append(vl)
-            if pkg.has_update:
-                vb.append(Gtk.Label(label="→"))
-                nl2 = Gtk.Label(label=pkg.new_version)
-                nl2.add_css_class("has-update"); vb.append(nl2)
-        else:
-            vl = Gtk.Label(label=f"Available: {pkg.new_version}")
-            vl.add_css_class("dim-label"); vl.set_xalign(0); vb.append(vl)
+        ver = Gtk.Label(); ver.add_css_class("dim-label"); ver.set_xalign(0); vb.append(ver)
+        arrow = Gtk.Label(label="→"); vb.append(arrow)
+        new_ver = Gtk.Label(); new_ver.add_css_class("has-update"); vb.append(new_ver)
         nb.append(vb)
         hb.append(nb)
 
-        if pkg.installed_size:
-            sl = Gtk.Label(label=pkg.installed_size)
-            sl.add_css_class("dim-label"); sl.set_halign(Gtk.Align.END)
-            hb.append(sl)
-
-        row.set_child(hb)
+        size = Gtk.Label(); size.add_css_class("dim-label"); size.set_halign(Gtk.Align.END)
+        hb.append(size)
 
         right_click = Gtk.GestureClick(button=3)
-        right_click.connect("pressed",
-            lambda gesture, n_press, x, y: self._show_row_context_menu(pkg, row, x, y))
-        row.add_controller(right_click)
+        right_click.connect("pressed", self._on_row_right_click, hb)
+        hb.add_controller(right_click)
 
-        return row
+        hb.w = SimpleNamespace(cb=cb, action_icon=action_icon, app_icon=app_icon, name=name,
+                               badge=badge, dep=dep, not_inst=not_inst, ver=ver, arrow=arrow,
+                               new_ver=new_ver, size=size)
+        hb.pkg = None; hb.item = None; hb.binding = False; hb.badge_css = None
+        list_item.set_child(hb)
 
-    def _show_row_context_menu(self, pkg: Package, row: Gtk.ListBoxRow, x: float, y: float):
+    def _row_bind(self, _factory, list_item):
+        """Show one package in a (possibly recycled) row."""
+        hb  = list_item.get_child()
+        pkg = list_item.get_item().pkg
+        w   = hb.w
+        hb.pkg, hb.item = pkg, list_item
+        hb.binding = True
+        try:
+            w.name.set_label(pkg.display_name or pkg.name)
+            if hb.badge_css:
+                w.badge.remove_css_class(hb.badge_css)
+            hb.badge_css = f"badge-{pkg.repo}"
+            w.badge.add_css_class(hb.badge_css)
+            w.badge.set_label(pkg.repo)
+            w.dep.set_visible(bool(pkg.is_dep))
+            w.not_inst.set_visible(not pkg.installed)
+            self._set_row_icon(w.app_icon, pkg)
+
+            # Checkbox: re-derive its state from the current filter
+            if not pkg.installed:
+                w.cb.set_active(pkg.checked)
+                w.cb.set_sensitive(True)
+                w.cb.set_tooltip_text("Select to install")
+            elif self.current_filter == "updates":
+                w.cb.set_active(pkg.checked and not pkg.marked_remove)
+                w.cb.set_sensitive(pkg.has_update)
+                w.cb.set_tooltip_text("Select to update" if pkg.has_update else "")
+            else:
+                w.cb.set_active(pkg.checked and pkg.marked_remove)
+                w.cb.set_sensitive(True)
+                w.cb.set_tooltip_text("Select to uninstall")
+            self._refresh_action_icon(w.action_icon, pkg)
+
+            if pkg.installed:
+                w.ver.set_label(pkg.version)
+                w.arrow.set_visible(bool(pkg.has_update))
+                w.new_ver.set_visible(bool(pkg.has_update))
+                w.new_ver.set_label(pkg.new_version if pkg.has_update else "")
+            else:
+                w.ver.set_label(f"Available: {pkg.new_version}")
+                w.arrow.set_visible(False)
+                w.new_ver.set_visible(False)
+
+            w.size.set_label(pkg.installed_size or "")
+            w.size.set_visible(bool(pkg.installed_size))
+        finally:
+            hb.binding = False
+
+    def _row_unbind(self, _factory, list_item):
+        hb = list_item.get_child()
+        if hb is not None:
+            hb.pkg = None
+            hb.item = None
+
+    def _on_row_check_toggled(self, cb, hb):
+        pkg = hb.pkg
+        if hb.binding or pkg is None:
+            return
+        self._on_pkg_check(cb, pkg)
+        self._refresh_action_icon(hb.w.action_icon, pkg)
+
+    def _on_row_right_click(self, _gesture, _n_press, x, y, hb):
+        if hb.pkg is not None:
+            self._show_row_context_menu(hb.pkg, hb, x, y)
+
+    def _show_row_context_menu(self, pkg: Package, row: Gtk.Widget, x: float, y: float):
         """Right-click menu: copy name, open homepage, force-refresh changelog."""
-        self.listbox.select_row(row)
+        li = row.item
+        if li is not None and li.get_position() != Gtk.INVALID_LIST_POSITION:
+            self.selection.set_selected(li.get_position())
 
         popover = Gtk.Popover()
         popover.set_parent(row)
@@ -4165,12 +4239,6 @@ class PakchanWindow(Adw.ApplicationWindow):
     # ── List population ───────────────────────────────────────────────────────
 
     def _populate_list(self):
-        # Cancel any in-progress population
-        self._pop_generation = getattr(self, "_pop_generation", 0) + 1
-
-        while child := self.listbox.get_first_child():
-            self.listbox.remove(child)
-
         flt = self.current_filter
         q   = self.search.get_text().lower().strip()
 
@@ -4211,21 +4279,8 @@ class PakchanWindow(Adw.ApplicationWindow):
                 self.empty_state.set_title("No packages here")
                 self.empty_state.set_description("Nothing in this category right now.")
 
-        # Progressive rendering in chunks so UI stays responsive
-        CHUNK = 80
-        gen   = self._pop_generation
-
-        def _add_chunk(offset: int):
-            if self._pop_generation != gen:
-                return False   # stale — a new populate started, abort
-            chunk = pool[offset: offset + CHUNK]
-            for p in chunk:
-                self.listbox.append(self._make_row(p))
-            if offset + CHUNK < len(pool):
-                GLib.idle_add(_add_chunk, offset + CHUNK)
-            return False
-
-        GLib.idle_add(_add_chunk, 0)
+        # All items at once; GTK only creates widgets for the rows on screen
+        self.store.splice(0, self.store.get_n_items(), [PkgItem(p) for p in pool])
 
         # 'Select all' stays Updates-only; Apply button is always visible
         is_upd = (flt == "updates")
@@ -4662,9 +4717,6 @@ class PakchanWindow(Adw.ApplicationWindow):
         else:
             img.set_visible(False)
 
-    def _on_action_icon_refresh(self, cb, pkg: Package, action_icon: Gtk.Image):
-        self._refresh_action_icon(action_icon, pkg)
-
     def _on_pkg_check(self, cb, pkg: Package):
         active = cb.get_active()
         pkg.checked = active
@@ -4676,9 +4728,30 @@ class PakchanWindow(Adw.ApplicationWindow):
         self._update_counts_label()
         self._update_footer()
 
-    def _on_row_selected(self, lb, row):
-        if row is None: return
-        pkg = row.pkg
+    def _on_list_key(self, _controller, keyval, _keycode, state):
+        if keyval not in (Gdk.KEY_Up, Gdk.KEY_Down):
+            return False
+        if state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK
+                    | Gdk.ModifierType.ALT_MASK):
+            return False
+        n = self.store.get_n_items()
+        if n == 0:
+            return False
+        cur = self.selection.get_selected()
+        if cur == Gtk.INVALID_LIST_POSITION:
+            pos = 0
+        else:
+            pos = max(0, min(n - 1, cur + (1 if keyval == Gdk.KEY_Down else -1)))
+        try:
+            self.listview.scroll_to(pos, Gtk.ListScrollFlags.SELECT | Gtk.ListScrollFlags.FOCUS, None)
+        except AttributeError:
+            self.selection.set_selected(pos)
+        return True
+
+    def _on_item_selected(self, selection, _pspec):
+        item = selection.get_selected_item()
+        if item is None: return
+        pkg = item.pkg
         self.selected_pkg = pkg
         self.d_name.set_markup(f"<b>{GLib.markup_escape_text(pkg.display_name or pkg.name)}</b>")
         self.d_desc.set_text(pkg.description or "Loading…")
@@ -4719,24 +4792,6 @@ class PakchanWindow(Adw.ApplicationWindow):
         for k, b in self._tab_btns.items():
             b.set_active(k == key)
         self._render_detail()
-
-    # Keyboard arrow navigation
-    def _on_list_key(self, controller, keyval, keycode, state):
-        UP   = Gdk.KEY_Up
-        DOWN = Gdk.KEY_Down
-        if keyval not in (UP, DOWN):
-            return False
-        row = self.listbox.get_selected_row()
-        if row is None:
-            first = self.listbox.get_row_at_index(0)
-            if first: self.listbox.select_row(first)
-            return True
-        idx  = row.get_index()
-        next_row = self.listbox.get_row_at_index(idx + (1 if keyval == DOWN else -1))
-        if next_row:
-            self.listbox.select_row(next_row)
-            next_row.grab_focus()
-        return True
 
     # ── Detail panel ──────────────────────────────────────────────────────────
 
