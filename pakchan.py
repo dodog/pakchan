@@ -240,7 +240,7 @@ def _dbg_get() -> list[str]:
 
 
 # ─── Network / input hardening ────────────────────────────────────────────────
-import errno, http.client, ipaddress, signal, socket, zlib
+import errno, http.client, ipaddress, signal, socket, sqlite3, zlib
 
 _MAX_HTTP_BYTES     = 8 * 1024 * 1024
 _MAX_AUR_GZ_BYTES   = 128 * 1024 * 1024
@@ -1001,9 +1001,8 @@ def _load_pacman_aur(local_db: dict, sync_names: set,
     pacman_pending = _updates_from_versions(
         {n: i.get("version", "") for n, i in (sync_full or {}).items()},
         {n: v for n, v in installed.items() if n in sync_names})
-    aur_pending = _updates_from_versions(
-        {n: i.get("version", "") for n, i in KNOWN_AUR_META.items()},
-        {n: v for n, v in installed.items() if n not in sync_names})
+    foreign = {n: v for n, v in installed.items() if n not in sync_names}
+    aur_pending = _updates_from_versions(_aur_versions(foreign), foreign)
     desktop_info = _desktop_entries_info()
 
     pkgs = []
@@ -1357,7 +1356,7 @@ CL_MAX_AGE_S   = 7 * 86400   # 7 days — fix #6
 AUR_META_URL       = "https://aur.archlinux.org/packages-meta-ext-v1.json.gz"
 AUR_META_CACHE     = CACHE_DIR / "aur_meta.json.gz"
 AUR_META_MAX_AGE_S = 24 * 3600
-KNOWN_AUR_META: dict[str, dict] = {}   # {name: {version, desc, url, license, depends}}
+AUR_INDEX_DB       = CACHE_DIR / "aur_index.db"   # SQLite lookup built from the dump
 
 KNOWN_GITHUB_REPOS:  dict[str, str]             = {}
 KNOWN_GITLAB_REPOS:  dict[str, tuple[str, str]] = {}
@@ -1492,60 +1491,208 @@ def _parse_aur_meta(gz_bytes: bytes) -> dict[str, dict]:
     return result
 
 
-def _load_aur_meta_from_cache():
-    """Load from disk cache."""
-    global KNOWN_AUR_META
-    if AUR_META_CACHE.exists():
-        try:
-            KNOWN_AUR_META = _parse_aur_meta(AUR_META_CACHE.read_bytes())
-            print(f"[aur-meta] loaded {len(KNOWN_AUR_META)} packages from "
-                  f"disk cache ({AUR_META_CACHE})", file=sys.stderr)
-        except Exception as e:
-            print(f"[aur-meta] failed to read disk cache: {e}", file=sys.stderr)
-    else:
-        print(f"[aur-meta] no disk cache yet at {AUR_META_CACHE} — "
-              f"waiting for background fetch", file=sys.stderr)
+# ── AUR lookup database ──────────────────────────────────────────────────────────────────────────
 
 
-def _refresh_aur_meta_bg():
-    """Refresh AUR's metadata dump in the background if the cache is stale."""
-    def _fetch():
-        global KNOWN_AUR_META
-        need_refresh = True
-        if AUR_META_CACHE.exists():
-            age = time.time() - AUR_META_CACHE.stat().st_mtime
-            need_refresh = age > AUR_META_MAX_AGE_S
-        if not need_refresh:
-            print(f"[aur-meta] disk cache is fresh enough, skipping "
-                  f"background re-fetch", file=sys.stderr)
-            return
-        print(f"[aur-meta] fetching {AUR_META_URL} …", file=sys.stderr)
-        try:
-            req = urllib.request.Request(
-                AUR_META_URL, headers={"User-Agent": "Pakchan/2.0"})
-            with urllib.request.urlopen(req, timeout=30) as r:
-                gz_bytes = _read_capped(r, _MAX_AUR_GZ_BYTES)
-        except Exception as e:
-            print(f"[aur-meta] fetch failed: {e}", file=sys.stderr)
-            return
+AUR_INDEX_VERSION = 1
+_AUR_COLS = "name, version, desc, url, license, depends, conflicts, provides"
+_AUR_SEARCH_SQL = """
+    SELECT name FROM pkg
+    WHERE instr(name_l, :q) > 0 OR instr(desc_l, :q) > 0
+    ORDER BY CASE WHEN name_l = :q THEN 0
+                  WHEN instr(name_l, :q) = 1 THEN 1
+                  WHEN instr(name_l, :q) > 0 THEN 2
+                  ELSE 3 END,
+             length(name), name"""
+
+
+def _aur_connect() -> Optional[sqlite3.Connection]:
+    con = None
+    try:
+        if not AUR_INDEX_DB.exists():
+            return None
+        con = sqlite3.connect(f"file:{urllib.parse.quote(str(AUR_INDEX_DB))}?mode=ro",
+                              uri=True, timeout=5)
+        if con.execute("PRAGMA user_version").fetchone()[0] != AUR_INDEX_VERSION:
+            raise sqlite3.Error("unsupported AUR index version")
+        return con
+    except (sqlite3.Error, OSError):
+        if con is not None:
+            con.close()
+        return None
+
+
+def _aur_index_ok() -> bool:
+    con = _aur_connect()
+    if con is None:
+        return False
+    con.close()
+    return True
+
+
+def _aur_infos_on(con: sqlite3.Connection, names: list) -> dict:
+    out: dict[str, dict] = {}
+    for i in range(0, len(names), 500):
+        chunk = names[i:i + 500]
+        sql = f"SELECT {_AUR_COLS} FROM pkg WHERE name IN ({','.join('?' * len(chunk))})"
+        for r in con.execute(sql, chunk):
+            out[r[0]] = {"version": r[1], "desc": r[2], "url": r[3], "license": r[4],
+                         "depends": r[5], "conflicts": r[6], "provides": r[7]}
+    return out
+
+
+def _aur_infos(names) -> dict:
+    """{name: info} for those of `names` that exist in the AUR."""
+    names = list(dict.fromkeys(names))
+    con = _aur_connect()
+    if con is None or not names:
+        if con is not None:
+            con.close()
+        return {}
+    try:
+        return _aur_infos_on(con, names)
+    except sqlite3.Error as e:
+        print(f"[aur-meta] lookup failed: {e}", file=sys.stderr)
+        return {}
+    finally:
+        con.close()
+
+
+def _aur_info(name: str) -> Optional[dict]:
+    return _aur_infos([name]).get(name)
+
+
+def _aur_versions(names) -> dict:
+    return {n: i["version"] for n, i in _aur_infos(names).items()}
+
+
+def _aur_search(q: str, exclude: set, limit: int = 150) -> list
+
+    if not q:
+        return []
+    con = _aur_connect()
+    if con is None:
+        return []
+    try:
+        picked: list[str] = []
+        for (name,) in con.execute(_AUR_SEARCH_SQL, {"q": q}):
+            if name in exclude:
+                continue
+            picked.append(name)
+            if len(picked) >= limit:
+                break
+        infos = _aur_infos_on(con, picked)
+        return [(n, infos[n]) for n in picked if n in infos]
+    except sqlite3.Error as e:
+        print(f"[aur-meta] search failed: {e}", file=sys.stderr)
+        return []
+    finally:
+        con.close()
+
+
+def _build_aur_index(gz_path, db_path) -> int:
+    """Convert the AUR dump into the lookup database"""
+    try:
+        gz_bytes = Path(gz_path).read_bytes()
+    except OSError as e:
+        print(f"[aur-meta] cannot read {gz_path}: {e}", file=sys.stderr)
+        return 0
+    meta = _parse_aur_meta(gz_bytes)
+    del gz_bytes
+    if not meta:
+        return 0
+    tmp = f"{db_path}.tmp-{os.getpid()}"
+    con = None
+    try:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        con = sqlite3.connect(tmp)
+        con.execute("PRAGMA journal_mode=OFF")
+        con.execute("PRAGMA synchronous=OFF")
+        con.execute("CREATE TABLE pkg(name TEXT PRIMARY KEY, version TEXT, desc TEXT, url TEXT, "
+                    "license TEXT, depends TEXT, conflicts TEXT, provides TEXT, "
+                    "name_l TEXT, desc_l TEXT) WITHOUT ROWID")
+        con.executemany(
+            "INSERT INTO pkg VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ((n, i["version"], i["desc"], i["url"], i["license"], i["depends"],
+              i["conflicts"], i["provides"], n.lower(), i["desc"].lower())
+             for n, i in meta.items()))
+        con.execute(f"PRAGMA user_version = {AUR_INDEX_VERSION}")
+        con.commit()
+        con.close()
+        con = None
+        os.replace(tmp, db_path)
+        return len(meta)
+    except (sqlite3.Error, OSError) as e:
+        print(f"[aur-meta] building the index failed: {e}", file=sys.stderr)
+        return 0
+    finally:
+        if con is not None:
+            con.close()
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
+def _build_aur_index_in_child(gz_path) -> int:
+    """Run _build_aur_index in a separate process"""
+    cmd = [sys.executable, str(Path(__file__).resolve()), "--build-aur-index",
+           str(gz_path), str(AUR_INDEX_DB)]
+    out, err, rc = _run_group(cmd, timeout=600)
+    if rc != 0:
+        print(f"[aur-meta] index build failed (exit {rc}): {err[-300:]}", file=sys.stderr)
+        return 0
+    try:
+        return int(out.splitlines()[-1])
+    except (ValueError, IndexError):
+        return 0
+
+
+def _refresh_aur_meta_now():
+    """Make sure the AUR lookup database exists and is at most a day old."""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    if AUR_META_CACHE.exists() and not _aur_index_ok():
+        # First start after an upgrade (or the index was deleted): build from the cached
+        # dump so AUR search works at once, even offline.
+        n = _build_aur_index_in_child(AUR_META_CACHE)
+        print(f"[aur-meta] built the index from the cached dump: {n} packages", file=sys.stderr)
+    if (AUR_META_CACHE.exists() and _aur_index_ok()
+            and time.time() - AUR_META_CACHE.stat().st_mtime <= AUR_META_MAX_AGE_S):
+        print("[aur-meta] index is fresh enough, skipping re-fetch", file=sys.stderr)
+        return
+    print(f"[aur-meta] fetching {AUR_META_URL} …", file=sys.stderr)
+    new_gz = AUR_META_CACHE.with_name(AUR_META_CACHE.name + ".new")
+    try:
+        req = urllib.request.Request(AUR_META_URL, headers={"User-Agent": "Pakchan/2.0"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            gz_bytes = _read_capped(r, _MAX_AUR_GZ_BYTES)
         if not gz_bytes:
             print("[aur-meta] fetch returned no data", file=sys.stderr)
             return
-        print(f"[aur-meta] fetched {len(gz_bytes)} bytes, parsing…", file=sys.stderr)
-        parsed = _parse_aur_meta(gz_bytes)
-        if not parsed:
-            print("[aur-meta] parse produced 0 packages — not caching or "
-                  "swapping in this result", file=sys.stderr)
+        new_gz.write_bytes(gz_bytes)
+        del gz_bytes
+        n = _build_aur_index_in_child(new_gz)
+        if not n:
+            print("[aur-meta] the new dump produced no packages — keeping the old data",
+                  file=sys.stderr)
             return
+        os.replace(new_gz, AUR_META_CACHE)
+        print(f"[aur-meta] ready: {n} packages available for search", file=sys.stderr)
+    except Exception as e:
+        print(f"[aur-meta] refresh failed: {e}", file=sys.stderr)
+    finally:
         try:
-            CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            AUR_META_CACHE.write_bytes(gz_bytes)
-        except Exception as e:
-            print(f"[aur-meta] failed to write disk cache: {e}", file=sys.stderr)
-        KNOWN_AUR_META = parsed
-        print(f"[aur-meta] ready: {len(KNOWN_AUR_META)} packages available "
-              f"for search", file=sys.stderr)
-    threading.Thread(target=_fetch, daemon=True).start()
+            if new_gz.exists():
+                new_gz.unlink()
+        except OSError:
+            pass
+
+
+def _refresh_aur_meta_bg():
+    """Refresh the AUR lookup database in the background."""
+    threading.Thread(target=_refresh_aur_meta_now, daemon=True).start()
 
 
 # ── Fix #2: Debounced changelog DB save ──────────────────────────────────────
@@ -4409,26 +4556,14 @@ class PakchanWindow(Adw.ApplicationWindow):
     def _find_installable_aur_matches(self, q: str, limit: int = 150) -> list:
         if not q:
             return []
-        if not KNOWN_AUR_META:
-            print("[aur-meta] search ran but KNOWN_AUR_META is still empty "
-                  "(background fetch not done yet, or it failed — check "
-                  "earlier [aur-meta] messages above)", file=sys.stderr)
-            return []
         installed_names = {p.name for p in self.all_packages}
-        scored = []
-        for name, info in KNOWN_AUR_META.items():
-            if name in installed_names:
-                continue
-            name_l = name.lower()
-            if name_l == q:            rank = 0
-            elif name_l.startswith(q): rank = 1
-            elif q in name_l:          rank = 2
-            elif q in info.get("desc", "").lower(): rank = 3
-            else:                      continue
-            scored.append((rank, len(name), name, info))
-        scored.sort(key=lambda t: (t[0], t[1], t[2]))
+        found = _aur_search(q, installed_names, limit)
+        if not found and not _aur_index_ok():
+            print("[aur-meta] search ran but the AUR index is not built yet "
+                  "(background fetch not done, or it failed — check earlier "
+                  "[aur-meta] messages above)", file=sys.stderr)
         matches = []
-        for _, _, name, info in scored[:limit]:
+        for name, info in found:
             cache_key = f"aur:{name}"
             pkg = self._available_cache.get(cache_key)
             if pkg is None:
@@ -4463,10 +4598,11 @@ class PakchanWindow(Adw.ApplicationWindow):
                 )
                 self._available_cache[cache_key] = pkg
             out.append(pkg)
+        aur_infos = _aur_infos([n for n in POPULAR_AUR_NAMES if n not in installed_names])
         for name in POPULAR_AUR_NAMES:
             if name in installed_names:
                 continue
-            info = KNOWN_AUR_META.get(name)
+            info = aur_infos.get(name)
             if not info:
                 continue
             cache_key = f"aur:{name}"
@@ -4488,7 +4624,7 @@ class PakchanWindow(Adw.ApplicationWindow):
         if pkg.repo == "pacman":
             info = self.pacman_sync_full.get(pkg.name)
         elif pkg.repo == "aur":
-            info = KNOWN_AUR_META.get(pkg.name)
+            info = _aur_info(pkg.name)
         if not info:
             return set()
         raw = info.get("conflicts", "")
@@ -5653,10 +5789,14 @@ def _on_exit():
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 4 and sys.argv[1] == "--build-aur-index":
+        # Child process - lookup database
+        n = _build_aur_index(sys.argv[2], sys.argv[3])
+        print(n)
+        sys.exit(0 if n else 1)
     import atexit
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     _load_mappings_from_cache()   # disk-only at startup, instant
-    _load_aur_meta_from_cache()   # Same pattern, for AUR search-to-install
     _cl_db_load()
     atexit.register(_on_exit)     # always flush on exit
     app = PakchanApp()
