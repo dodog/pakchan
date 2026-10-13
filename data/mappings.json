@@ -435,7 +435,7 @@
     "scribus": "https://www.scribus.net/news",
     "tellico": "https://tellico-project.org/tellico-changelog/",
     "thunderbird": "https://www.thunderbird.net/en-US/thunderbird/releases/",
-    "virtualbox": "https://www.virtualbox.org/wiki/Changelog",
+    "virtualbox": "https://www.virtualbox.org/wiki/Changelog"
   },
   "total_packages": 177
 }
