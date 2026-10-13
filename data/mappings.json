@@ -401,6 +401,10 @@
       "host": "gitlab.winehq.org",
       "repo": "mono/wine-mono"
     },
+    "vlc": {
+      "host": "code.videolan.org",
+      "repo": "videolan/vlc"
+    },    
     "wireshark": {
       "host": "gitlab.com",
       "repo": "wireshark/wireshark"
@@ -432,7 +436,6 @@
     "tellico": "https://tellico-project.org/tellico-changelog/",
     "thunderbird": "https://www.thunderbird.net/en-US/thunderbird/releases/",
     "virtualbox": "https://www.virtualbox.org/wiki/Changelog",
-    "vlc": "https://www.videolan.org/vlc/releases/"
   },
   "total_packages": 177
 }
