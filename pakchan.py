@@ -1379,7 +1379,42 @@ KNOWN_GITLAB_LIKE = {
     "source.kde.org",
     "gitlab.winehq.org",
     "gitlab.archlinux.org",
+    "www.opencode.net",
 }
+
+
+# Hosts that redirect
+_GITLAB_HOST_ALIASES = {"opencode.net": "www.opencode.net"}
+
+
+def _gitlab_hosts() -> set:
+    return (KNOWN_GITLAB_LIKE | set(_GITLAB_HOST_ALIASES)
+            | {h.lower() for h, _ in KNOWN_GITLAB_REPOS.values()})
+
+
+def _gitlab_canonical_host(host: str) -> Optional[str]:
+    host = (host or "").lower()
+    host = _GITLAB_HOST_ALIASES.get(host, host)
+    for cand in (host, host[4:] if host.startswith("www.") else ""):
+        if cand and (cand.startswith("gitlab.") or cand in _gitlab_hosts()):
+            return cand
+    return None
+
+
+def _gitlab_in_url(url: str) -> Optional[tuple]:
+    try:
+        p = urllib.parse.urlsplit(url or "")
+    except ValueError:
+        return None
+    host = _gitlab_canonical_host(p.hostname or "")
+    if not host:
+        return None
+    segs = [s for s in p.path.split("/") if s]
+    segs = segs[:segs.index("-")] if "-" in segs else segs[:2]
+    if len(segs) < 2:
+        return None
+    segs[-1] = segs[-1].removesuffix(".git")
+    return host, "/".join(segs)
 
 # Forgejo/Gitea hosts 
 KNOWN_FORGEJO_HOSTS = {"codeberg.org", "code.manjaro.org"}
@@ -1435,28 +1470,101 @@ def _apply_mappings(data: dict):
     }
 
 
+# Check for mappings database
+_MAPPINGS_LOADED = False
+_MAPPINGS_RETRY_DELAY = 3.0
+_mappings_lock = threading.Lock()
+_mappings_attempt_done = threading.Event()
+_mappings_attempt_done.set()
+
+
+def _mappings_summary() -> str:
+    return (f"{len(KNOWN_GITHUB_REPOS)} github, {len(KNOWN_GITLAB_REPOS)} gitlab, "
+            f"{len(KNOWN_FORGEJO_REPOS)} forgejo, {len(KNOWN_RELEASE_PAGES)} release pages, "
+            f"{len(KNOWN_CUSTOM)} custom")
+
+
 def _load_mappings_from_cache():
     """Load from disk cache immediately (called at startup, no network)."""
-    if MAPPINGS_CACHE.exists():
-        try:
-            _apply_mappings(json.loads(MAPPINGS_CACHE.read_text()))
-        except Exception:
-            pass
+    global _MAPPINGS_LOADED
+    if not MAPPINGS_CACHE.exists():
+        print(f"[mappings] no cache yet at {MAPPINGS_CACHE}", file=sys.stderr)
+        return
+    try:
+        _apply_mappings(json.loads(MAPPINGS_CACHE.read_text()))
+        _MAPPINGS_LOADED = True
+        print(f"[mappings] loaded from cache: {_mappings_summary()}", file=sys.stderr)
+    except Exception as e:
+        print(f"[mappings] cache unreadable ({e}) — will download again", file=sys.stderr)
+
+
+def _fetch_mappings_once() -> bool:
+    global _MAPPINGS_LOADED
+    raw = http_get(MAPPINGS_URL, timeout=10)
+    if not raw:
+        print("[mappings] download failed (no answer, or the host is temporarily skipped)",
+              file=sys.stderr)
+        return False
+    try:
+        data = json.loads(raw)
+    except ValueError as e:
+        print(f"[mappings] the downloaded file is not valid JSON ({e}) — keeping the old data",
+              file=sys.stderr)
+        return False
+    sections = ("github", "gitlab", "forgejo", "custom", "release_pages")
+    if not isinstance(data, dict) or not any(isinstance(data.get(s), dict) and data[s]
+                                             for s in sections):
+        print("[mappings] the downloaded file contains no mappings — keeping the old data",
+              file=sys.stderr)
+        return False
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = MAPPINGS_CACHE.with_name(MAPPINGS_CACHE.name + ".tmp")
+        tmp.write_text(raw, encoding="utf-8")
+        os.replace(tmp, MAPPINGS_CACHE)
+    except OSError as e:
+        print(f"[mappings] could not write the cache ({e}) — using the download anyway",
+              file=sys.stderr)
+    _apply_mappings(data)
+    _MAPPINGS_LOADED = True
+    print(f"[mappings] downloaded: {_mappings_summary()}", file=sys.stderr)
+    return True
+
+
+def _refresh_mappings_now() -> bool:
+    """Download the mappings (first start or deleted cache) """
+    _mappings_attempt_done.clear()
+    try:
+        attempts = 1 if _MAPPINGS_LOADED else 2
+        for i in range(attempts):
+            if _fetch_mappings_once():
+                return True
+            if i + 1 < attempts:
+                time.sleep(_MAPPINGS_RETRY_DELAY)
+        return False
+    finally:
+        _mappings_attempt_done.set()
 
 
 def _refresh_mappings_bg():
-    """Fix #1: Fetch remote mappings in background after UI is shown."""
-    def _fetch():
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        raw = http_get(MAPPINGS_URL, timeout=10)
-        if raw:
-            try:
-                data = json.loads(raw)
-                MAPPINGS_CACHE.write_text(raw, encoding="utf-8")
-                _apply_mappings(data)
-            except Exception:
-                pass
-    threading.Thread(target=_fetch, daemon=True).start()
+    """Download the mappings in the background."""
+    if not _mappings_lock.acquire(blocking=False):
+        return
+    _mappings_attempt_done.clear()      # lookups made from now on wait for the result
+
+    def _run():
+        try:
+            _refresh_mappings_now()
+        finally:
+            _mappings_lock.release()
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _wait_for_mappings(timeout: float = 8.0) -> bool:
+    if _MAPPINGS_LOADED:
+        return True
+    _mappings_attempt_done.wait(timeout)
+    return _MAPPINGS_LOADED
 
 
 def _parse_aur_meta(gz_bytes: bytes) -> dict[str, dict]:
@@ -1566,8 +1674,7 @@ def _aur_versions(names) -> dict:
     return {n: i["version"] for n, i in _aur_infos(names).items()}
 
 
-def _aur_search(q: str, exclude: set, limit: int = 150) -> list
-
+def _aur_search(q: str, exclude: set, limit: int = 150) -> list:
     if not q:
         return []
     con = _aur_connect()
@@ -2448,7 +2555,7 @@ def _find_repo_link_in_page(url: str) -> Optional[tuple]:
         low = raw_full.lower()
         # Filter only GitHub / GitLab-looking links
         if ("github.com" not in low and "gitlab" not in low
-                and not any(k in low for k in ("invent.kde.org", "source.kde.org"))
+                and not any(h in low for h in _gitlab_hosts())
                 and not any(h in low for h in _forgejo_hosts())):
             continue
 
@@ -2469,8 +2576,7 @@ def _find_repo_link_in_page(url: str) -> Optional[tuple]:
             # require at least owner/repo
             parts = [s for s in path.split("/") if s and s != "-"]
             if len(parts) >= 2:
-                repo = "/".join(parts[:len(parts)])  # keep nested groups if present
-                # strip .git suffix
+                repo = "/".join(parts[:2])
                 repo = repo.removesuffix(".git").rstrip("/")
                 _dbg(f"[homepage scan] github candidate -> {repo}")
                 return ("github", repo)
@@ -2479,7 +2585,7 @@ def _find_repo_link_in_page(url: str) -> Optional[tuple]:
                 continue
 
         # If host looks like a GitLab instance
-        if "gitlab" in host or host.endswith("invent.kde.org") or host.endswith("source.kde.org") or host.endswith("gitlab.gnome.org"):
+        if "gitlab" in host or _gitlab_canonical_host(host.split(":")[0]):
             # Normalize and strip trailing pieces like /-/work_items
             base = normalize_repo_from_href(raw_full)
             # base may be something like https://gitlab.gnome.org/GNOME/gnome-calendar
@@ -2488,6 +2594,7 @@ def _find_repo_link_in_page(url: str) -> Optional[tuple]:
                 _dbg(f"[homepage scan] gitlab candidate parse fail: {base}")
                 continue
             ghost, gpath = m.group(1), m.group(2)
+            ghost = _gitlab_canonical_host(ghost.split(":")[0]) or ghost
             parts = [s for s in gpath.split("/") if s and s != "-"]
             if len(parts) >= 2:
                 repo = "/".join(parts)  # keep subgroup/project if present
@@ -2529,6 +2636,12 @@ def _find_repo_via_homepage(url: str, pkg_name: str = "") -> Optional[tuple]:
         repo = gl.group(2).rstrip("/")
         if not pkg_name or _repo_name_plausible(pkg_name, repo):
             return ("gitlab", gl.group(1), repo)
+        return None
+
+    gl2 = _gitlab_in_url(url)
+    if gl2:
+        if not pkg_name or _repo_name_plausible(pkg_name, gl2[1]):
+            return ("gitlab", gl2[0], gl2[1])
         return None
 
     fj = _forgejo_in_url(url)
@@ -3109,6 +3222,11 @@ def _upstream_changelog(url: str, pkg_name: str, version: str) -> Optional[dict]
     if gl:
         r = _gitlab_releases(gl.group(1), gl.group(2).removesuffix(".git"), pkg_name, version)
         if r and r.get("versions"): return r
+    # 2a. Direct URL into a known GitLab whose host isn't named gitlab.*
+    gl2 = None if gl else _gitlab_in_url(url)
+    if gl2:
+        r = _gitlab_releases(gl2[0], gl2[1], pkg_name, version)
+        if r and r.get("versions"): return r
     # 2b. Direct Forgejo/Gitea URL (known hosts only)
     fj = _forgejo_in_url(url)
     if fj:
@@ -3339,7 +3457,15 @@ def fetch_changelog_pacman(pkg: Package) -> dict:
                 _dbg(f"[3] direct Forgejo URL: hit ({host}/{repo})")
                 return r
             _dbg(f"[3] direct Forgejo URL {host}/{repo}: no usable data")
-        if not gh and not gl and not fj:
+        gl2 = None if gl else _gitlab_in_url(pkg.url)
+        if gl2:
+            host, repo = gl2
+            r = _gitlab_releases(host, repo, pkg.name, target_version)
+            if r and r.get("versions"):
+                _dbg(f"[3] direct GitLab URL (known host): hit ({host}/{repo})")
+                return r
+            _dbg(f"[3] direct GitLab URL (known host) {host}/{repo}: no usable data")
+        if not gh and not gl and not gl2 and not fj:
             _dbg("[3] package URL is not a direct GitHub/GitLab/Forgejo link")
     else:
         _dbg("[3] no package URL to check")
@@ -3453,6 +3579,14 @@ def fetch_changelog_aur(pkg: Package) -> dict:
                 _dbg(f"[3] direct Forgejo URL: hit ({host}/{repo})")
                 return r
             _dbg(f"[3] direct Forgejo URL {host}/{repo}: no usable data")
+        gl2 = None if gl else _gitlab_in_url(pkg.url)
+        if gl2:
+            host, repo = gl2
+            r = _gitlab_releases(host, repo, pkg.name, target_version)
+            if r and r.get("versions"):
+                _dbg(f"[3] direct GitLab URL (known host): hit ({host}/{repo})")
+                return r
+            _dbg(f"[3] direct GitLab URL (known host) {host}/{repo}: no usable data")
     else:
         _dbg("[3] no package URL to check")
 
@@ -3702,6 +3836,9 @@ def fetch_changelog(pkg: Package) -> dict:
         cached["_version_mismatch"] = True
 
     _dbg_reset()
+    mappings_ready = _wait_for_mappings()
+    if not mappings_ready:
+        _dbg("[mappings] not available (download pending or failed) — this result is not cached")
     ctx = _budget_begin(_FETCH_BUDGET_S)
     _dbg(f"Resolving changelog for package={pkg.name!r} repo={pkg.repo!r} "
          f"url={pkg.url!r}")
@@ -3747,7 +3884,7 @@ def fetch_changelog(pkg: Package) -> dict:
     real = (bool(result.get("versions")) and not result.get("_link_only")
             and result.get("source") != "unavailable"
             and not result.get("_version_mismatch"))
-    if result.get("versions") and (real or not ctx.incomplete):
+    if result.get("versions") and mappings_ready and (real or not ctx.incomplete):
         entry = dict(result)
         entry["_target"] = target
         _cl_cache_set(key, entry)
@@ -4726,11 +4863,13 @@ class PakchanWindow(Adw.ApplicationWindow):
             return False
 
         self.stack.set_visible_child_name("main")
-        self._populate_list()
-        # Fix #1: refresh mappings in background after UI is shown
-        _refresh_mappings_bg()
-        _refresh_aur_meta_bg()
-        self._start_update_check()
+        try:
+            self._populate_list()
+        finally:
+            if not _MAPPINGS_LOADED:
+                _refresh_mappings_bg()
+            _refresh_aur_meta_bg()
+            self._start_update_check()
         return False
 
     # ── Online update check (second phase of loading) ─────────────────────────
@@ -4753,6 +4892,8 @@ class PakchanWindow(Adw.ApplicationWindow):
         if not available:
             return
         _reset_host_state()
+        if not _MAPPINGS_LOADED:
+            _refresh_mappings_bg()
         for p in self.all_packages:
             if p.changelog and p.changelog.get("_incomplete"):
                 p.changelog = None
@@ -5797,6 +5938,7 @@ if __name__ == "__main__":
     import atexit
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     _load_mappings_from_cache()   # disk-only at startup, instant
+    _refresh_mappings_bg()        # starts in background
     _cl_db_load()
     atexit.register(_on_exit)     # always flush on exit
     app = PakchanApp()
