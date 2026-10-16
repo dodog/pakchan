@@ -1121,6 +1121,74 @@ def _flatpak_search(q: str) -> list[dict]:
     return results
 
 
+_PKGBUILD_FILE_CAP = 200_000   # bytes read from any one file of an AUR package
+
+
+def _aur_clone_url(base: str) -> str:
+    return f"https://aur.archlinux.org/{urllib.parse.quote(base)}.git"
+
+
+def _aur_package_base(name: str) -> Optional[str]:
+    data = http_get_json(f"https://aur.archlinux.org/rpc/v5/info/{urllib.parse.quote(name)}")
+    try:
+        return data["results"][0].get("PackageBase") or None
+    except (TypeError, KeyError, IndexError, AttributeError):
+        return None
+
+
+def _read_small_text(path: Path) -> str:
+    with open(path, "rb") as f:
+        raw = f.read(_PKGBUILD_FILE_CAP + 1)
+    text = raw[:_PKGBUILD_FILE_CAP].decode("utf-8", errors="replace")
+    if len(raw) > _PKGBUILD_FILE_CAP:
+        text += "\n[… cut: the file is longer than shown here]"
+    return text
+
+
+def _aur_clone_and_read(base: str) -> tuple:
+    """PKGBUILD plus any install scripts, list other files."""
+    with tempfile.TemporaryDirectory(prefix="pakchan-aur-") as tmp:
+        dest = Path(tmp) / "repo"
+        out, err, rc = run_git(
+            ["git", "clone", "-q", "--depth=1", _aur_clone_url(base), str(dest)], timeout=25)
+        if rc != 0:
+            return None, f"git clone of {base} failed: {(err or out or 'no output')[-200:]}"
+        pkgbuild = dest / "PKGBUILD"
+        if pkgbuild.is_symlink() or not pkgbuild.is_file():
+            return None, f"the AUR repository {base} has no PKGBUILD"
+        parts = [_read_small_text(pkgbuild)]
+        others = []
+        for f in sorted(dest.iterdir()):
+            if f.name in ("PKGBUILD", ".SRCINFO") or f.is_symlink() or not f.is_file():
+                continue
+            if f.suffix == ".install":
+                parts.append(f"\n\n# ===== {f.name} (runs as root when the package is installed, "
+                             f"updated or removed) =====\n\n" + _read_small_text(f))
+            else:
+                others.append(f.name)
+        if others:
+            parts.append("\n\n# ===== Other files in this package (not shown): "
+                         + ", ".join(others) + " =====")
+        return "".join(parts), ""
+
+
+def _fetch_aur_pkgbuild(name: str) -> tuple:
+    if not cmd_exists("git"):
+        return None, "git is not installed"
+    if not _is_safe_ident(name):
+        return None, "unsafe package name"
+    text, err = _aur_clone_and_read(name)
+    if text is not None:
+        return text, ""
+    base = _aur_package_base(name)
+    if base and base != name and _is_safe_ident(base):
+        text2, err2 = _aur_clone_and_read(base)
+        if text2 is not None:
+            return text2, ""
+        return None, err2
+    return None, err
+
+
 def _load_snap() -> list:
     if not cmd_exists("snap"):
         return []
@@ -3981,6 +4049,8 @@ class PakchanWindow(Adw.ApplicationWindow):
         self.pacman_sync_full:     dict[str, dict]  = {}
         self._available_cache:     dict[str, Package] = {}
         self.search_extra_results: list[Package]    = []
+        self._pkgbuild_cache:    dict[str, tuple] = {}
+        self._pkgbuild_inflight: set[str]         = set()
 
         self._build_ui()
         # Network state
@@ -4319,13 +4389,15 @@ class PakchanWindow(Adw.ApplicationWindow):
         self.tabs = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         self.tabs.set_homogeneous(True)
         self._tab_btns: dict[str, Gtk.ToggleButton] = {}
-        for key, label in [("changelog","Changelog"),("info","Info"),("files","Files")]:
+        for key, label in [("changelog","Changelog"),("info","Info"),("files","Files"),
+                           ("pkgbuild","PKGBUILD")]:
             btn = Gtk.ToggleButton(label=label)
             btn.add_css_class("flat")
             btn.connect("clicked", self._on_tab, key)
             self._tab_btns[key] = btn
             self.tabs.append(btn)
         self._tab_btns["changelog"].set_active(True)
+        self._tab_btns["pkgbuild"].set_visible(False)   # shown for AUR packages only
         box.append(self.tabs)
         box.append(Gtk.Separator())
 
@@ -5076,6 +5148,7 @@ class PakchanWindow(Adw.ApplicationWindow):
             if pkg.cl_key not in self._enrich_inflight:
                 self._enrich_inflight.add(pkg.cl_key)
                 threading.Thread(target=self._enrich_bg, args=(pkg,), daemon=True).start()
+        self._sync_pkgbuild_tab(pkg)
         self._render_detail()
 
     def _enrich_bg(self, pkg: Package):
@@ -5117,6 +5190,7 @@ class PakchanWindow(Adw.ApplicationWindow):
         if   self.current_tab == "info":      self._render_info(pkg)
         elif self.current_tab == "changelog":  self._render_changelog(pkg)
         elif self.current_tab == "files":      self._render_files(pkg)
+        elif self.current_tab == "pkgbuild":   self._render_pkgbuild(pkg)
 
     def _info_row(self, label: str, value: str, is_url: bool = False):
         hb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -5421,6 +5495,92 @@ class PakchanWindow(Adw.ApplicationWindow):
         note = Gtk.Label(label="File list not available.")
         note.add_css_class("dim-label"); note.set_wrap(True)
         self.d_box.append(note)
+
+    # ── PKGBUILD tab (AUR packages only) ──────────────────────────────────────
+
+    _PKGBUILD_TTL       = 600       # seconds a downloaded PKGBUILD is reused
+    _PKGBUILD_MAX_CHARS = 200_000   # longer scripts are cut for display
+
+    def _sync_pkgbuild_tab(self, pkg: Package):
+        """Show the PKGBUILD tab for AUR packages only"""
+        is_aur = pkg.repo == "aur"
+        self._tab_btns["pkgbuild"].set_visible(is_aur)
+        if not is_aur and self.current_tab == "pkgbuild":
+            self.current_tab = "changelog"
+            for k, b in self._tab_btns.items():
+                b.set_active(k == "changelog")
+
+    def _render_pkgbuild(self, pkg: Package):
+        if pkg.repo != "aur":
+            return
+        hit = self._pkgbuild_cache.get(pkg.name)
+        if hit is not None and time.monotonic() - hit[0] > self._PKGBUILD_TTL:
+            hit = None
+        if hit is None:
+            sp = Gtk.Spinner(); sp.start()
+            sp.set_size_request(24, 24); sp.set_halign(Gtk.Align.CENTER)
+            self.d_box.append(sp)
+            lbl = Gtk.Label(label="Downloading PKGBUILD…")
+            lbl.add_css_class("dim-label"); lbl.set_halign(Gtk.Align.CENTER)
+            self.d_box.append(lbl)
+            if pkg.name not in self._pkgbuild_inflight:
+                self._pkgbuild_inflight.add(pkg.name)
+                threading.Thread(target=self._bg_pkgbuild, args=(pkg,), daemon=True).start()
+            return
+
+        text = hit[1]
+        if text is None:
+            detail = hit[2] if len(hit) > 2 else ""
+            err = Gtk.Label(label="Could not get the PKGBUILD from the AUR."
+                                  + (f"\n{detail}" if detail else ""))
+            err.add_css_class("error"); err.set_wrap(True); err.set_xalign(0)
+            err.set_wrap_mode(Pango.WrapMode.WORD_CHAR); err.set_selectable(True)
+            self.d_box.append(err)
+            rb = Gtk.Button(label="Retry"); rb.set_halign(Gtk.Align.START)
+            rb.connect("clicked", lambda _: (self._pkgbuild_cache.pop(pkg.name, None),
+                                             self._render_detail()))
+            self.d_box.append(rb)
+            return
+
+        quoted = urllib.parse.quote(pkg.name)
+        tree_url = GLib.markup_escape_text(
+            f"https://aur.archlinux.org/cgit/aur.git/tree/?h={quoted}")
+        note = Gtk.Label()
+        note.set_markup(
+            "AUR packages are not vetted. Read this script before installing: it runs on "
+            "your machine during the build, and any install scripts run as root. "
+            f'<a href="{tree_url}">View all files of this package</a>')
+        note.connect("activate-link", _on_activate_link)
+        note.set_xalign(0); note.set_wrap(True); note.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        note.set_hexpand(True); note.add_css_class("dim-label"); note.set_margin_bottom(6)
+        self.d_box.append(note)
+
+        shown = text
+        if len(shown) > self._PKGBUILD_MAX_CHARS:
+            shown = shown[:self._PKGBUILD_MAX_CHARS] + "\n\n[… cut: the file is longer than shown here]"
+        tv = Gtk.TextView()
+        tv.set_editable(False)
+        tv.set_cursor_visible(False)
+        tv.set_wrap_mode(Gtk.WrapMode.CHAR)
+        tv.add_css_class("mono")
+        tv.get_buffer().set_text(shown)
+        self.d_box.append(tv)
+
+    def _bg_pkgbuild(self, pkg: Package):
+        try:
+            text, err = _fetch_aur_pkgbuild(pkg.name)
+        except Exception as e:
+            text, err = None, f"unexpected error: {e}"
+        if text is None:
+            print(f"[pkgbuild] {pkg.name}: {err}", file=sys.stderr)
+        GLib.idle_add(self._pkgbuild_done, pkg, text, err)
+
+    def _pkgbuild_done(self, pkg: Package, text, err: str = ""):
+        self._pkgbuild_inflight.discard(pkg.name)
+        self._pkgbuild_cache[pkg.name] = (time.monotonic(), text, err)
+        if self._is_selected(pkg) and self.current_tab == "pkgbuild":
+            self._render_detail()
+        return False
 
     def _bg_files(self, pkg: Package):
         out, _, rc = run(["pacman", "-Ql", pkg.name])
