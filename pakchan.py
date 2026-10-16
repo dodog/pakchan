@@ -1084,12 +1084,20 @@ def _load_flatpak() -> list:
     return pkgs
 
 
+_FP_CACHE_TTL = 300
+_FP_CACHE_MAX = 30    # queries remembered
+_fp_search_cache: dict[str, tuple[float, list]] = {}
+
+
 def _flatpak_search(q: str) -> list[dict]:
     """Search all configured Flatpak remotes via `flatpak search`."""
     if not cmd_exists("flatpak"):
         return []
+    hit = _fp_search_cache.get(q)
+    if hit and time.monotonic() - hit[0] < _FP_CACHE_TTL:
+        return hit[1]
     out, _, rc = run(["flatpak", "search", q], timeout=8)
-    if rc != 0 or not out:
+    if rc != 0:      # a failure or timeout: not cached
         return []
     results = []
     for line in out.splitlines():
@@ -1107,6 +1115,9 @@ def _flatpak_search(q: str) -> list[dict]:
             "desc": desc.strip(), "version": version.strip(),
             "remote": remote,
         })
+    _fp_search_cache[q] = (time.monotonic(), results)
+    while len(_fp_search_cache) > _FP_CACHE_MAX:
+        _fp_search_cache.pop(next(iter(_fp_search_cache)))
     return results
 
 
