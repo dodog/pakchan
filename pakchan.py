@@ -113,7 +113,6 @@ app.run(None)
 sys.exit(1 if app.cancelled else 0)
 '''
 
-# Disable WebKit process sandbox when user namespaces are unavailable
 import gzip, html, json, os, re, shlex, shutil, sys, tarfile, tempfile, threading, time
 
 # Strip ANSI codes from raw pty output for the no-Vte fallback view
@@ -122,7 +121,6 @@ _ANSI_ESCAPE_RE = re.compile(
 
 _VER_OP_RE = re.compile(r'[<>=].*$')
 
-os.environ.setdefault("WEBKIT_DISABLE_SANDBOX", "1")
 # Force GTK's Cairo renderer to avoid Zink/Vulkan driver warnings
 os.environ.setdefault("GSK_RENDERER", "cairo")
 import subprocess, urllib.request, urllib.error, urllib.parse
@@ -1187,6 +1185,32 @@ def _fetch_aur_pkgbuild(name: str) -> tuple:
             return text2, ""
         return None, err2
     return None, err
+
+
+def _bullet_list(items: list, limit: int = 12) -> str:
+    text = "\n".join(f"• {n}" for n in items[:limit])
+    if len(items) > limit:
+        text += f"\n…and {len(items) - limit} more"
+    return text
+
+
+def _pacman_removal_preview(names: list) -> tuple:
+    env = dict(os.environ, LC_ALL="C")
+    out, err, rc = _run_group(
+        ["pacman", "-Rs", "--print", "--print-format", "%n", *names], timeout=15, env=env)
+    if rc == 0:
+        extra = [ln.strip() for ln in out.splitlines()
+                 if ln.strip() and ln.strip() not in names]
+        return sorted(dict.fromkeys(extra)), None
+    if "could not satisfy dependencies" in err.lower():
+        problem = []
+        for ln in err.splitlines():
+            m = re.match(r"^::\s*(\S+): requires (.+)$", ln.strip())
+            if m:
+                problem.append(f"{m.group(1)} needs {m.group(2)}")
+        return None, problem or ["other installed packages still need them"]
+    print(f"[remove-preview] could not run (exit {rc}): {err[-200:]}", file=sys.stderr)
+    return None, None
 
 
 def _load_snap() -> list:
@@ -4051,6 +4075,7 @@ class PakchanWindow(Adw.ApplicationWindow):
         self.search_extra_results: list[Package]    = []
         self._pkgbuild_cache:    dict[str, tuple] = {}
         self._pkgbuild_inflight: set[str]         = set()
+        self._preview_busy = False
 
         self._build_ui()
         # Network state
@@ -5780,6 +5805,43 @@ class PakchanWindow(Adw.ApplicationWindow):
             dlg.present(self)
             return
 
+        pacman_rm = [p.name for p in sel
+                     if p.marked_remove and p.repo in ("pacman", "aur")]
+        if not pacman_rm:
+            self._show_confirm(sel, None)
+            return
+        if self._preview_busy:
+            return
+        self._preview_busy = True
+        self.apply_btn.set_sensitive(False)
+        threading.Thread(target=self._bg_removal_preview, args=(sel, pacman_rm),
+                         daemon=True).start()
+
+    def _bg_removal_preview(self, sel: list, names: list):
+        try:
+            res = _pacman_removal_preview(names)
+        except Exception as e:
+            print(f"[remove-preview] crashed: {e}", file=sys.stderr)
+            res = (None, None)
+        GLib.idle_add(self._removal_preview_done, sel, res)
+
+    def _removal_preview_done(self, sel: list, res: tuple):
+        self._preview_busy = False
+        self.apply_btn.set_sensitive(self._checked_count() > 0)
+        extra, problem = res
+        if problem:
+            dlg = Adw.AlertDialog(
+                heading="Cannot uninstall",
+                body=("Other packages still need what you are removing:\n"
+                      f"{_bullet_list(problem, 6)}\n\n"
+                      "Also select the packages that need it, or uncheck this one."))
+            dlg.add_response("ok", "OK")
+            dlg.present(self)
+            return False
+        self._show_confirm(sel, extra)
+        return False
+
+    def _show_confirm(self, sel: list, extra: Optional[list]):
         all_installs = all(not p.installed for p in sel)
         any_installs = any(not p.installed for p in sel)
         removals = [p for p in sel if p.marked_remove]
@@ -5789,8 +5851,14 @@ class PakchanWindow(Adw.ApplicationWindow):
             if len(removals) > 5:
                 names += f", and {len(removals) - 5} more"
             heading, verb = "Uninstall selected packages?", "Uninstall"
-            body = (f"Remove {names} and "
-                    f"{'its' if len(removals) == 1 else 'their'} unused dependencies.")
+            if extra is None:
+                body = (f"Remove {names} and "
+                        f"{'its' if len(removals) == 1 else 'their'} unused dependencies.")
+            elif extra:
+                body = (f"Remove {names} and these unused dependencies:\n"
+                        f"{_bullet_list(extra)}")
+            else:
+                body = f"Remove {names}."
         elif removals or (any_installs and not all_installs):
             heading, verb = "Apply selected changes?", "Apply"
             body = (f"{verb} {len(sel)} package(s)"
@@ -5802,6 +5870,8 @@ class PakchanWindow(Adw.ApplicationWindow):
         else:
             heading, verb = "Update selected packages?", "Update"
             body = f"{verb} {len(sel)} package(s)."
+        if extra and not removal_only:
+            body += f"\n\nThese unused dependencies will be removed too:\n{_bullet_list(extra)}"
         # Partial upgrade risk warning
         if any(not p.installed and p.repo in ("pacman", "aur") for p in sel):
             if self._local_db_pending_count():
