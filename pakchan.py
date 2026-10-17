@@ -4866,6 +4866,13 @@ class PakchanWindow(Adw.ApplicationWindow):
                     unresolved.append((p, c))
         return resolved, unresolved
 
+    def _local_db_pending_count(self) -> int:
+        installed = {p.name: p.version for p in self.all_packages
+                     if p.repo == "pacman" and p.installed}
+        avail = {n: i.get("version", "") for n, i in self.pacman_sync_full.items()
+                 if n in installed}
+        return len(_updates_from_versions(avail, installed))
+
     def _update_counts_label(self):
         """Rebuild the "N packages · N selected" label under the list."""
         pool    = self.filtered
@@ -5782,25 +5789,26 @@ class PakchanWindow(Adw.ApplicationWindow):
             if len(removals) > 5:
                 names += f", and {len(removals) - 5} more"
             heading, verb = "Uninstall selected packages?", "Uninstall"
-            body = (f"Remove {names}. Any dependencies these packages pulled "
-                     f"in that nothing else needs will be removed too — "
-                     f"pacman refuses on its own if something else still "
-                     f"depends on one of them. You'll be asked for your "
-                     f"password in the usual system prompt.")
-        elif removals or any_installs:
+            body = (f"Remove {names} and "
+                    f"{'its' if len(removals) == 1 else 'their'} unused dependencies.")
+        elif removals or (any_installs and not all_installs):
             heading, verb = "Apply selected changes?", "Apply"
             body = (f"{verb} {len(sel)} package(s)"
                      + (f", including {len(removals)} removal(s)" if removals else "")
-                     + ". You'll be asked for your password in the usual "
-                       f"system prompt.")
+                     + ".")
         elif all_installs:
             heading, verb = "Install selected packages?", "Install"
-            body = (f"{verb} {len(sel)} package(s). You'll be asked for your "
-                     f"password in the usual system prompt.")
+            body = f"{verb} {len(sel)} package(s)."
         else:
             heading, verb = "Update selected packages?", "Update"
-            body = (f"{verb} {len(sel)} package(s). You'll be asked for your "
-                     f"password in the usual system prompt.")
+            body = f"{verb} {len(sel)} package(s)."
+        # Partial upgrade risk warning
+        if any(not p.installed and p.repo in ("pacman", "aur") for p in sel):
+            if self._local_db_pending_count():
+                body += ("\n\nThere are updates waiting to be processed. It is recommended "
+                         "that you perform a full update before installing new packages to "
+                         "avoid a partial system update (Updates tab → Select all). "
+                         "You can still start the installation right now.")
         dlg = Adw.AlertDialog(heading=heading, body=body)
         dlg.add_response("cancel", "Cancel")
         dlg.add_response("apply", verb)
