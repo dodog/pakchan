@@ -123,8 +123,8 @@ _VER_OP_RE = re.compile(r'[<>=].*$')
 os.environ.setdefault("GSK_RENDERER", "cairo")
 import subprocess, urllib.request, urllib.error, urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -558,64 +558,41 @@ def _on_activate_link(_label, uri: str) -> bool:
     return not _is_http_url(uri)
 
 
+_BROWSER_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+_BROWSER_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+
+
+def _http_text(url: str, timeout: int, header_sets: list) -> Optional[str]:
+    for headers in header_sets:
+        try:
+            req = urllib.request.Request(
+                url, headers={**headers, "Accept-Language": "en-US,en;q=0.9"})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return _read_capped(r).decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as e:
+            if e.code != 406:
+                return None
+        except Exception:
+            return None
+    return None
+
+
 def http_get(url: str, timeout: int = 14) -> Optional[str]:
     """Send realistic browser headers so release-note sites don't reject requests."""
-    try:
-        req = urllib.request.Request(url, headers={
-            "User-Agent": (
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            ),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-        })
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return _read_capped(r).decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as e:
-        if e.code == 406:
-            try:
-                req = urllib.request.Request(url, headers={
-                    "User-Agent": "Mozilla/5.0",
-                    "Accept": "*/*",
-                    "Accept-Language": "en-US,en;q=0.9",
-                })
-                with urllib.request.urlopen(req, timeout=timeout) as r:
-                    return _read_capped(r).decode("utf-8", errors="replace")
-            except Exception:
-                return None
-        return None
-    except Exception:
-        return None
+    return _http_text(url, timeout, [
+        {"User-Agent": _BROWSER_UA, "Accept": _BROWSER_ACCEPT},
+        {"User-Agent": "Mozilla/5.0", "Accept": "*/*"},
+    ])
 
 
 def http_get_json(url: str, timeout: int = 14):
     """Fetch and parse a JSON API endpoint"""
-    try:
-        req = urllib.request.Request(url, headers={
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "application/json",
-            "Accept-Language": "en-US,en;q=0.9",
-        })
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            body = _read_capped(r).decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as e:
-        if e.code == 406:
-            try:
-                req = urllib.request.Request(url, headers={
-                    "User-Agent": (
-                        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-                    ),
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Accept-Language": "en-US,en;q=0.9",
-                })
-                with urllib.request.urlopen(req, timeout=timeout) as r:
-                    body = _read_capped(r).decode("utf-8", errors="replace")
-            except Exception:
-                return None
-        else:
-            return None
-    except Exception:
+    body = _http_text(url, timeout, [
+        {"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+        {"User-Agent": _BROWSER_UA, "Accept": _BROWSER_ACCEPT},
+    ])
+    if body is None:
         return None
     try:
         return json.loads(body)
@@ -764,7 +741,7 @@ def _read_sync_db() -> tuple[set, dict, bool]:
 
 # ─── Update detection ─────────────────────────────────────────────────────────
 
-def _updates_from_versions(avail: dict, installed: dict) -> dict:
+def _updates_from_versions(avail: dict, installed: dict, stop_at_first: bool = False) -> dict:
     if not cmd_exists("vercmp"):
         return {}
     result: dict[str, str] = {}
@@ -776,6 +753,8 @@ def _updates_from_versions(avail: dict, installed: dict) -> dict:
         try:
             if rc == 0 and int(out.strip()) > 0:
                 result[name] = new
+                if stop_at_first:
+                    break
         except ValueError:
             pass
     return result
@@ -1970,18 +1949,19 @@ def _strip_html(text: str) -> str:
     return html.unescape(text).strip()
 
 
+def _is_md_noise(line: str) -> bool:
+    """Blank lines, PGP signature blobs, tag metadata and bare version lines."""
+    return (not line or _is_pgp_garbage(line)
+            or bool(re.match(r'^(tag|tagger|release)\b', line, re.I))
+            or bool(re.match(r'^(version\b|v\b)\s*\d', line.lower()))
+            or bool(re.match(r'^\d+(?:[\.\-]\d+)+$', line)))
+
+
 def _parse_md_changelog(body: str) -> list[str]:
     changes = []
     for line in body.splitlines():
         line = line.strip()
-        if not line:
-            continue
-        # Skip obvious noise lines
-        if _is_pgp_garbage(line):
-            continue
-        if re.match(r'^(tag|tagger|release)\b', line, re.I):
-            continue
-        if re.match(r'^(version\b|v\b)\s*\d', line.lower()) or re.match(r'^\d+(?:[\.\-]\d+)+$', line):
+        if _is_md_noise(line):
             continue
         if line.startswith(("- ", "* ", "+ ", "• ")):
             text = line[2:].strip()
@@ -1994,15 +1974,9 @@ def _parse_md_changelog(body: str) -> list[str]:
     if not changes and body:
         for line in body.splitlines():
             line = line.strip()
-            if not line:
+            if _is_md_noise(line):
                 continue
-            if _is_pgp_garbage(line):
-                continue
-            if re.match(r'^(tag|tagger|release)\b', line, re.I):
-                continue
-            if re.match(r'^(version\b|v\b)\s*\d', line.lower()) or re.match(r'^\d+(?:[\.\-]\d+)+$', line):
-                continue
-            if line and not line.startswith("#") and not line.startswith("http"):
+            if not line.startswith("#") and not line.startswith("http"):
                 changes.append(line)
             if len(changes) >= 4:
                 break
@@ -3246,71 +3220,7 @@ def _gitlab_git_fallback(host: str, repo: str, _pkg_name: str,
     return None
 
 def _upstream_changelog(url: str, pkg_name: str, version: str) -> Optional[dict]:
-    name = pkg_name.lower()
-    # NOTE: mappings are checked centrally via _check_mappings_first
-    if name in KNOWN_CUSTOM:
-        entry = KNOWN_CUSTOM[name]
-        r = _scrape_custom(pkg_name, entry, version)
-        if r and r.get("versions") and _target_version_satisfied(r["versions"], version):
-            if version and not _versions_contain_target(r["versions"], version):
-                r["_version_unconfirmed"] = True
-            return r
-        url = entry.get("url", "")
-        if url:
-            return {
-                "versions": [{"version": version, "date": "",
-                              "changes": [f"See {url} for details."]}],
-                "source": f"Custom ({entry.get('parser', '')}) — {url}",
-                "_link_only": True,
-                "_link_url": url,
-            }
-    if name in KNOWN_RELEASE_PAGES:
-        page_url = KNOWN_RELEASE_PAGES[name]
-        r = _generic_release_page_scraper(page_url, pkg_name)
-        if r and r.get("versions") and _target_version_satisfied(r["versions"], version):
-            if version and not _versions_contain_target(r["versions"], version):
-                r["_version_unconfirmed"] = True
-            return r
-        return {
-            "versions": [{"version": version, "date": "",
-                          "changes": [f"See {page_url} for details."]}],
-            "source": f"Release page — {page_url}",
-            "_link_only": True,
-            "_link_url": page_url,
-        }
-
-    # Known Forgejo/GitLab/GitHub mappings: return a link-only fallback for direct callers
-    if name in KNOWN_FORGEJO_REPOS:
-        host, repo = KNOWN_FORGEJO_REPOS[name]
-        url = _FORGES["forgejo"]["web_releases"].format(host=host, repo=repo)
-        return {
-            "versions": [{"version": version, "date": "",
-                          "changes": [f"See {url} for details."]}],
-            "source": f"Forgejo repo mapping — {host}/{repo}",
-            "_link_only": True,
-            "_link_url": url,
-        }
-    if name in KNOWN_GITLAB_REPOS:
-        host, repo = KNOWN_GITLAB_REPOS[name]
-        url = f"https://{host}/{repo}/-/releases"
-        return {
-            "versions": [{"version": version, "date": "",
-                          "changes": [f"See {url} for details."]}],
-            "source": f"GitLab repo mapping — {host}/{repo}",
-            "_link_only": True,
-            "_link_url": url,
-        }
-    if name in KNOWN_GITHUB_REPOS:
-        repo = KNOWN_GITHUB_REPOS[name]
-        url = f"https://github.com/{repo}/releases"
-        return {
-            "versions": [{"version": version, "date": "",
-                          "changes": [f"See {url} for details."]}],
-            "source": f"GitHub repo mapping — {repo}",
-            "_link_only": True,
-            "_link_url": url,
-        }
-
+    # Mappings were already checked
     if not url:
         return None
     # 1. Direct GitHub URL
@@ -3522,9 +3432,6 @@ def fetch_changelog_pacman(pkg: Package) -> dict:
     else:
         _dbg("[2] local AppStream: no usable file")
 
-    # Steps 4/5 (known GitLab/GitHub mapping) are skipped here
-    name = pkg.name.lower()
-
     # 3. Direct GitHub/GitLab URL
     if not pkg.url:
         out, _, _ = run(["pacman", "-Si", pkg.name])
@@ -3644,9 +3551,6 @@ def fetch_changelog_aur(pkg: Package) -> dict:
         local_stale = r
     else:
         _dbg("[2] local AppStream: no usable file")
-
-    # Step 4 (known GitLab/GitHub mapping) is skipped here
-    name = pkg.name.lower()
 
     # 3. Direct GitHub/GitLab URL
     if not pkg.url:
@@ -4026,6 +3930,7 @@ POPULAR_PACMAN_NAMES = [
     "godot", "syncthing", "nextcloud-client",
 ]
 
+
 class PkgItem(GObject.Object):
 
     def __init__(self, pkg):
@@ -4059,7 +3964,6 @@ class PakchanWindow(Adw.ApplicationWindow):
         self.current_tab    = "changelog"
         self.current_filter = "installed"
         self.current_sort   = SORT_OPTIONS[0]
-        self._sync_ok       = True
         # Pacman-repo package browsing/search-to-install support
         self.pacman_sync_full:     dict[str, dict]  = {}
         self._available_cache:     dict[str, Package] = {}
@@ -4864,12 +4768,12 @@ class PakchanWindow(Adw.ApplicationWindow):
                     unresolved.append((p, c))
         return resolved, unresolved
 
-    def _local_db_pending_count(self) -> int:
+    def _local_db_has_pending(self) -> bool:
         installed = {p.name: p.version for p in self.all_packages
                      if p.repo == "pacman" and p.installed}
         avail = {n: i.get("version", "") for n, i in self.pacman_sync_full.items()
                  if n in installed}
-        return len(_updates_from_versions(avail, installed))
+        return bool(_updates_from_versions(avail, installed, stop_at_first=True))
 
     def _update_counts_label(self):
         """Rebuild the "N packages · N selected" label under the list."""
@@ -4941,7 +4845,6 @@ class PakchanWindow(Adw.ApplicationWindow):
         # Cached "available to install" results are now stale
         self._available_cache = {}
         self.search_extra_results = []
-        self._sync_ok     = sync_ok
         # Fix #19
         self.sync_banner.set_revealed(not sync_ok and bool(pkgs))
 
@@ -5256,6 +5159,16 @@ class PakchanWindow(Adw.ApplicationWindow):
         icon.add_css_class("dim-label")
         return icon
 
+    def _append_refresh_row(self, pkg: Package):
+        ref_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        if pkg.changelog.get("_from_cache"):
+            ref_row.append(self._make_cached_icon())
+        ref_btn = Gtk.Button(label="↻ Refresh")
+        ref_btn.add_css_class("flat"); ref_btn.set_halign(Gtk.Align.START)
+        ref_btn.connect("clicked", lambda _: self._force_refresh_cl(pkg))
+        ref_row.append(ref_btn)
+        self.d_box.append(ref_row)
+
     def _render_changelog(self, pkg: Package):
         if pkg.changelog is None:
             sp = Gtk.Spinner(); sp.start()
@@ -5292,14 +5205,7 @@ class PakchanWindow(Adw.ApplicationWindow):
             link_lbl.set_margin_bottom(4)
             self.d_box.append(link_lbl)
 
-            ref_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-            if pkg.changelog.get("_from_cache"):
-                ref_row.append(self._make_cached_icon())
-            ref_btn = Gtk.Button(label="↻ Refresh")
-            ref_btn.add_css_class("flat"); ref_btn.set_halign(Gtk.Align.START)
-            ref_btn.connect("clicked", lambda _: self._force_refresh_cl(pkg))
-            ref_row.append(ref_btn)
-            self.d_box.append(ref_row)
+            self._append_refresh_row(pkg)
 
             self._append_debug_expander(pkg)
             return
@@ -5366,14 +5272,7 @@ class PakchanWindow(Adw.ApplicationWindow):
             unconfirmed_lbl.set_hexpand(True)
             self.d_box.append(unconfirmed_lbl)
 
-        ref_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        if pkg.changelog.get("_from_cache"):
-            ref_row.append(self._make_cached_icon())
-        ref_btn = Gtk.Button(label="↻ Refresh")
-        ref_btn.add_css_class("flat"); ref_btn.set_halign(Gtk.Align.START)
-        ref_btn.connect("clicked", lambda _: self._force_refresh_cl(pkg))
-        ref_row.append(ref_btn)
-        self.d_box.append(ref_row)
+        self._append_refresh_row(pkg)
         self.d_box.append(Gtk.Separator())
 
         for v in pkg.changelog.get("versions", []):
@@ -5847,7 +5746,7 @@ class PakchanWindow(Adw.ApplicationWindow):
             body += f"\n\nThese unused dependencies will be removed too:\n{_bullet_list(extra)}"
         # Partial upgrade risk warning
         if any(not p.installed and p.repo in ("pacman", "aur") for p in sel):
-            if self._local_db_pending_count():
+            if self._local_db_has_pending():
                 body += ("\n\nThere are updates waiting to be processed. It is recommended "
                          "that you perform a full update before installing new packages to "
                          "avoid a partial system update (Updates tab → Select all). "
