@@ -467,6 +467,7 @@ def _guard_request(req) -> str:
     host = (urllib.parse.urlsplit(req.full_url).hostname or "").lower()
     if _host_is_down(host):
         _note_failed(host, "skipped")
+        _dbg(f"[net] {host}: skipped — temporarily marked unavailable (earlier failures or rate limit)")
         raise urllib.error.URLError(f"{host} is temporarily marked unavailable")
     ctx = _ctx()
     req._pk_clamped = False
@@ -474,6 +475,7 @@ def _guard_request(req) -> str:
         left = ctx.deadline - time.monotonic()
         if left <= 0:
             ctx.incomplete = True
+            _dbg(f"[budget] {host}: lookup time limit reached, request not sent")
             raise FetchBudgetExceeded()
         t = req.timeout if isinstance(req.timeout, (int, float)) else _REQ_TIMEOUT_CAP
         t = min(t, _REQ_TIMEOUT_CAP)
@@ -489,6 +491,7 @@ def _track(host: str, fn, req):
         if not getattr(req, "_pk_clamped", False):
             _note_net_failure(host, e)
         else:
+            _dbg(f"[net] {host}: request cut short by the lookup time limit")
             _note_incomplete()
         raise
     _note_http_status(host, resp)
@@ -572,6 +575,7 @@ def _http_text(url: str, timeout: int, header_sets: list) -> Optional[str]:
                 return _read_capped(r).decode("utf-8", errors="replace")
         except urllib.error.HTTPError as e:
             if e.code != 406:
+                _dbg(f"[http] HTTP {e.code} for {url[:90]}")
                 return None
         except Exception:
             return None
@@ -597,6 +601,7 @@ def http_get_json(url: str, timeout: int = 14):
     try:
         return json.loads(body)
     except Exception:
+        _dbg(f"[http] the answer from {url[:90]} was not valid JSON")
         return None
 
 
