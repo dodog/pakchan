@@ -36,6 +36,10 @@
       "host": "code.manjaro.org",
       "repo": "applications/pacman-mirrors"
     },  
+    "manjaro-application-utility": {
+      "host": "code.manjaro.org",
+      "repo": "applications/application-utility"
+    },      
     "mkvtoolnix-gui": {
       "host": "codeberg.org",
       "repo": "mbunkus/mkvtoolnix"
