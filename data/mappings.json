@@ -39,7 +39,11 @@
     "manjaro-application-utility": {
       "host": "code.manjaro.org",
       "repo": "applications/application-utility"
-    },      
+    },     
+    "manjaro-gnome-settings": {
+      "host": "code.manjaro.org",
+      "repo": "profiles/manjaro-gnome-settings"
+    },     
     "mkvtoolnix-gui": {
       "host": "codeberg.org",
       "repo": "mbunkus/mkvtoolnix"
