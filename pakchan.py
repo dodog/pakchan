@@ -2698,37 +2698,55 @@ def _find_repo_link_in_page(url: str) -> Optional[tuple]:
     return None
 
 
+def _repo_from_url(url: str) -> Optional[tuple]:
+    """The source repository a URL points into, or None: ("github", "owner/repo"),
+    ("gitlab", host, "group/project") or ("forgejo", host, "owner/repo")."""
+    gh = re.search(r"github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", url)
+    if gh:
+        return ("github", gh.group(1).rstrip("/").removesuffix(".git"))
+    gl = re.search(r"(gitlab\.[^/\s]+)/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", url)
+    if gl:
+        return ("gitlab", gl.group(1), gl.group(2).removesuffix(".git"))
+    gl2 = _gitlab_in_url(url)       # a known GitLab whose host isn't named gitlab.*
+    if gl2:
+        return ("gitlab", gl2[0], gl2[1])
+    fj = _forgejo_in_url(url)
+    if fj:
+        return ("forgejo", fj[0], fj[1])
+    return None
+
+
+def _repo_where(found: tuple) -> str:
+    """'owner/repo' or 'host/repo', for messages."""
+    return found[1] if found[0] == "github" else f"{found[1]}/{found[2]}"
+
+
+def _repo_releases_url(found: tuple) -> str:
+    if found[0] == "github":
+        return f"https://github.com/{found[1]}/releases"
+    if found[0] == "forgejo":
+        return _FORGES["forgejo"]["web_releases"].format(host=found[1], repo=found[2])
+    return f"https://{found[1]}/{found[2]}/-/releases"
+
+
+def _try_repo(found: tuple, pkg_name: str, target: str) -> Optional[dict]:
+    """Releases of a repository found by _repo_from_url or _find_repo_via_homepage."""
+    if found[0] == "github":
+        return _github_releases(found[1], pkg_name)
+    return _forge_releases(found[1], found[2], pkg_name, target, forge=found[0])
+
+
 def _find_repo_via_homepage(url: str, pkg_name: str = "") -> Optional[tuple]:
     """Resolve a package's source repo by following its homepage URL."""
     if not url:
         return None
 
-    if "github.com/" in url:
-        m = re.search(r"github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", url)
-        if m:
-            repo = m.group(1).rstrip("/")
-            if not pkg_name or _repo_name_plausible(pkg_name, repo):
-                return ("github", repo)
-            return None
+    def plausible(f: tuple) -> bool:
+        return not pkg_name or _repo_name_plausible(pkg_name, f[-1])
 
-    gl = re.search(r"(gitlab\.[A-Za-z0-9.-]+)/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", url)
-    if gl:
-        repo = gl.group(2).rstrip("/")
-        if not pkg_name or _repo_name_plausible(pkg_name, repo):
-            return ("gitlab", gl.group(1), repo)
-        return None
-
-    gl2 = _gitlab_in_url(url)
-    if gl2:
-        if not pkg_name or _repo_name_plausible(pkg_name, gl2[1]):
-            return ("gitlab", gl2[0], gl2[1])
-        return None
-
-    fj = _forgejo_in_url(url)
-    if fj:
-        if not pkg_name or _repo_name_plausible(pkg_name, fj[1]):
-            return ("forgejo", fj[0], fj[1])
-        return None
+    found = _repo_from_url(url)
+    if found:
+        return found if plausible(found) else None
 
     found = _find_repo_link_in_page(url)
     if found:
@@ -3224,55 +3242,42 @@ def _gitlab_git_fallback(host: str, repo: str, _pkg_name: str,
     # No meaningful annotated tags found via git fallback
     return None
 
-def _upstream_changelog(url: str, pkg_name: str, version: str) -> Optional[dict]:
+def _upstream_changelog(url: str, pkg_name: str, version: str, target: str = "") -> Optional[dict]:
     # Mappings were already checked
+    target = target or version
     if not url:
+        _dbg("[3] no package URL to check")
         return None
-    # 1. Direct GitHub URL
-    gh = re.search(r"github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", url)
-    if gh:
-        r = _github_releases(gh.group(1).rstrip("/").removesuffix(".git"), pkg_name)
-        if r and r.get("versions"): return r
-    # 2. Direct GitLab URL
-    gl = re.search(r"(gitlab\.[^/\s]+)/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", url)
-    if gl:
-        r = _gitlab_releases(gl.group(1), gl.group(2).removesuffix(".git"), pkg_name, version)
-        if r and r.get("versions"): return r
-    # 2a. Direct URL into a known GitLab whose host isn't named gitlab.*
-    gl2 = None if gl else _gitlab_in_url(url)
-    if gl2:
-        r = _gitlab_releases(gl2[0], gl2[1], pkg_name, version)
-        if r and r.get("versions"): return r
-    # 2b. Direct Forgejo/Gitea URL (known hosts only)
-    fj = _forgejo_in_url(url)
-    if fj:
-        r = _forge_releases(fj[0], fj[1], pkg_name, version, forge="forgejo")
-        if r and r.get("versions"): return r
-    # 3. Homepage scraping (GitHub, GitLab or Forgejo — whichever the homepage links to)
-    fallback_link = None
+    tried = _repo_from_url(url)
+    if tried:
+        r = _try_repo(tried, pkg_name, target)
+        if r and r.get("versions"):
+            _dbg(f"[3] direct repository URL: hit ({_repo_where(tried)})")
+            return r
+        _dbg(f"[3] direct repository URL {_repo_where(tried)}: no usable data")
+    else:
+        _dbg("[3] package URL is not a direct GitHub/GitLab/Forgejo link")
+
+    # Homepage scan: GitHub, GitLab or Forgejo, whichever the homepage links to
     found = _find_repo_via_homepage(url, pkg_name)
-    if found:
-        if found[0] == "github":
-            r = _github_releases(found[1], pkg_name)
-            if r and r.get("versions"): return r
-            fallback_link = f"https://github.com/{found[1]}/releases"
-        elif found[0] == "forgejo":
-            r = _forge_releases(found[1], found[2], pkg_name, version, forge="forgejo")
-            if r and r.get("versions"): return r
-            fallback_link = _FORGES["forgejo"]["web_releases"].format(host=found[1], repo=found[2])
-        else:
-            r = _gitlab_releases(found[1], found[2], pkg_name, version)
-            if r and r.get("versions"): return r
-            fallback_link = f"https://{found[1]}/{found[2]}/-/releases"
-    if fallback_link:
-        return {
-            "versions": [{"version": version or "", "date": "",
-                          "changes": [f"See {fallback_link} for details."]}],
-            "source": "Upstream repo link",
-            "_link_only": True,
-            "_link_url": fallback_link,
-        }
-    return None
+    if not found:
+        _dbg("[4] homepage scan: no repo link found (or rejected by plausibility check)")
+        return None
+    _dbg(f"[4] homepage scan found {found[0]} repo: {_repo_where(found)}")
+    if found != tried:          # don't ask the same repository twice
+        r = _try_repo(found, pkg_name, target)
+        if r and r.get("versions"):
+            _dbg("[4] homepage-discovered repo: hit")
+            return r
+    _dbg("[4] homepage-discovered repo: no usable data")
+    link = _repo_releases_url(found)
+    return {
+        "versions": [{"version": version or "", "date": "",
+                      "changes": [f"See {link} for details."]}],
+        "source": "Upstream repo link",
+        "_link_only": True,
+        "_link_url": link,
+    }
 
 # ─── Per-source changelog functions ──────────────────────────────────────────
 
@@ -3414,7 +3419,7 @@ def _stale_appstream(r: dict) -> dict:
     return r
 
 
-def fetch_changelog_pacman(pkg: Package) -> dict:
+def fetch_changelog_native(pkg: Package) -> dict:
     # 1. Always check mappings first
     r = _check_mappings_first(pkg)
     if r:
@@ -3437,241 +3442,23 @@ def fetch_changelog_pacman(pkg: Package) -> dict:
     else:
         _dbg("[2] local AppStream: no usable file")
 
-    # 3. Direct GitHub/GitLab URL
-    if not pkg.url:
-        out, _, _ = run(["pacman", "-Si", pkg.name])
-        for line in out.splitlines():
-            if line.strip().startswith("URL") and ":" in line:
-                pkg.url = line.partition(":")[2].strip()
-                break
+    # 3-4. The package's own URL, then its homepage (see _upstream_changelog)
+    if not pkg.url and pkg.repo == "aur":
+        pkg.url = (_aur_info(pkg.name) or {}).get("url", "")    # local AUR index, no network
     _dbg(f"[3] package URL: {pkg.url or '(none)'}")
-    if pkg.url:
-        gh = re.search(r"github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", pkg.url)
-        if gh:
-            repo = gh.group(1).rstrip("/").removesuffix(".git")
-            r = _github_releases(repo, pkg.name)
-            if r and r.get("versions"):
-                _dbg(f"[3] direct GitHub URL: hit ({repo})")
-                return r
-            _dbg(f"[3] direct GitHub URL {repo}: no usable data")
-        gl = re.search(r"(gitlab\.[^/\s]+)/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", pkg.url)
-        if gl:
-            host, repo = gl.group(1), gl.group(2).removesuffix(".git")
-            r = _gitlab_releases(host, repo, pkg.name, target_version)
-            if r and r.get("versions"):
-                _dbg(f"[3] direct GitLab URL: hit ({host}/{repo})")
-                return r
-            _dbg(f"[3] direct GitLab URL {host}/{repo}: no usable data")
-        fj = _forgejo_in_url(pkg.url)
-        if fj:
-            host, repo = fj
-            r = _forge_releases(host, repo, pkg.name, target_version, forge="forgejo")
-            if r and r.get("versions"):
-                _dbg(f"[3] direct Forgejo URL: hit ({host}/{repo})")
-                return r
-            _dbg(f"[3] direct Forgejo URL {host}/{repo}: no usable data")
-        gl2 = None if gl else _gitlab_in_url(pkg.url)
-        if gl2:
-            host, repo = gl2
-            r = _gitlab_releases(host, repo, pkg.name, target_version)
-            if r and r.get("versions"):
-                _dbg(f"[3] direct GitLab URL (known host): hit ({host}/{repo})")
-                return r
-            _dbg(f"[3] direct GitLab URL (known host) {host}/{repo}: no usable data")
-        if not gh and not gl and not gl2 and not fj:
-            _dbg("[3] package URL is not a direct GitHub/GitLab/Forgejo link")
-    else:
-        _dbg("[3] no package URL to check")
-
-    # 4. Homepage scraping for an indirect GitHub/GitLab link
-    fallback_link = None
-    if pkg.url:
-        found = _find_repo_via_homepage(pkg.url, pkg.name)
-        if found:
-            if found[0] == "github":
-                _dbg(f"[4] homepage scan found GitHub repo: {found[1]}")
-                r = _github_releases(found[1], pkg.name)
-                if r and r.get("versions"):
-                    _dbg("[4] homepage-discovered repo: hit")
-                    return r
-                fallback_link = f"https://github.com/{found[1]}/releases"
-            elif found[0] == "forgejo":
-                _dbg(f"[4] homepage scan found Forgejo repo: {found[1]}/{found[2]}")
-                r = _forge_releases(found[1], found[2], pkg.name, target_version, forge="forgejo")
-                if r and r.get("versions"):
-                    _dbg("[4] homepage-discovered repo: hit")
-                    return r
-                fallback_link = _FORGES["forgejo"]["web_releases"].format(host=found[1], repo=found[2])
-            else:
-                _dbg(f"[4] homepage scan found GitLab repo: {found[1]}/{found[2]}")
-                r = _gitlab_releases(found[1], found[2], pkg.name, target_version)
-                if r and r.get("versions"):
-                    _dbg("[4] homepage-discovered repo: hit")
-                    return r
-                fallback_link = f"https://{found[1]}/{found[2]}/-/releases"
-            _dbg("[4] homepage-discovered repo: no usable data")
-        else:
-            _dbg("[4] homepage scan: no repo link found (or rejected by plausibility check)")
-    else:
-        _dbg("[4] no package URL to scan")
+    r = _upstream_changelog(pkg.url, pkg.name, pkg.version, target_version)
+    if r and not r.get("_link_only"):
+        return r
 
     if local_stale:
         return _stale_appstream(local_stale)
 
-    if fallback_link:
-        return {
-            "versions": [{"version": pkg.version, "date": "",
-                          "changes": [f"See {fallback_link} for details."]}],
-            "source": "Upstream repo link",
-            "_link_only": True,
-            "_link_url": fallback_link,
-        }
+    if r:       # only a link to the repository's releases page
+        return r
 
-    # Nothing found: no PKGBUILD-history fallback for pacman-repo packages
+    # Nothing found
     return {"versions": [{"version": pkg.version, "date": "",
                           "changes": ["Changelog not found."]}],
-            "source": "unavailable",
-            "_manual_check_url": pkg.url or None}
-
-
-def fetch_changelog_aur(pkg: Package) -> dict:
-    # 1. Always check mappings first
-    r = _check_mappings_first(pkg)
-    if r:
-        _dbg(f"[1] mappings.json: hit ({r.get('source')})")
-        return r
-    _dbg("[1] mappings.json: no entry for this package")
-
-    # 2. Local AppStream metainfo (fast, on-disk, no network) — desktop apps only
-    target_version = pkg.new_version or pkg.version
-    local_stale = None
-    r = _local_appstream_releases(pkg.name)
-    if r:
-        _sort_versions_newest_first(r["versions"])
-        if _target_version_satisfied(r["versions"], target_version):
-            _dbg(f"[2] local AppStream: hit ({r.get('source')})")
-            return r
-        _dbg(f"[2] local AppStream: newest entry {r['versions'][0].get('version')!r} is older "
-             f"than {target_version!r} — keeping it as a fallback, checking upstream")
-        local_stale = r
-    else:
-        _dbg("[2] local AppStream: no usable file")
-
-    # 3. Direct GitHub/GitLab URL
-    if not pkg.url:
-        data = http_get_json(
-            f"https://aur.archlinux.org/rpc/v5/info/{urllib.parse.quote(pkg.name)}")
-        if data and data.get("results"):
-            pkg.url = data["results"][0].get("URL", "")
-    _dbg(f"[3] package URL: {pkg.url or '(none)'}")
-    if pkg.url:
-        gh = re.search(r"github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", pkg.url)
-        if gh:
-            repo = gh.group(1).rstrip("/").removesuffix(".git")
-            r = _github_releases(repo, pkg.name)
-            if r and r.get("versions"):
-                _dbg(f"[3] direct GitHub URL: hit ({repo})")
-                return r
-            _dbg(f"[3] direct GitHub URL {repo}: no usable data")
-        gl = re.search(r"(gitlab\.[^/\s]+)/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", pkg.url)
-        if gl:
-            host, repo = gl.group(1), gl.group(2).removesuffix(".git")
-            r = _gitlab_releases(host, repo, pkg.name, target_version)
-            if r and r.get("versions"):
-                _dbg(f"[3] direct GitLab URL: hit ({host}/{repo})")
-                return r
-            _dbg(f"[3] direct GitLab URL {host}/{repo}: no usable data")
-        fj = _forgejo_in_url(pkg.url)
-        if fj:
-            host, repo = fj
-            r = _forge_releases(host, repo, pkg.name, target_version, forge="forgejo")
-            if r and r.get("versions"):
-                _dbg(f"[3] direct Forgejo URL: hit ({host}/{repo})")
-                return r
-            _dbg(f"[3] direct Forgejo URL {host}/{repo}: no usable data")
-        gl2 = None if gl else _gitlab_in_url(pkg.url)
-        if gl2:
-            host, repo = gl2
-            r = _gitlab_releases(host, repo, pkg.name, target_version)
-            if r and r.get("versions"):
-                _dbg(f"[3] direct GitLab URL (known host): hit ({host}/{repo})")
-                return r
-            _dbg(f"[3] direct GitLab URL (known host) {host}/{repo}: no usable data")
-    else:
-        _dbg("[3] no package URL to check")
-
-    # 4. Homepage scraping (GitHub or GitLab)
-    fallback_link = None
-    if pkg.url:
-        found = _find_repo_via_homepage(pkg.url, pkg.name)
-        if found:
-            if found[0] == "github":
-                _dbg(f"[5] homepage scan found GitHub repo: {found[1]}")
-                r = _github_releases(found[1], pkg.name)
-                if r and r.get("versions"):
-                    _dbg("[4] homepage-discovered repo: hit")
-                    return r
-                fallback_link = f"https://github.com/{found[1]}/releases"
-            elif found[0] == "forgejo":
-                _dbg(f"[5] homepage scan found Forgejo repo: {found[1]}/{found[2]}")
-                r = _forge_releases(found[1], found[2], pkg.name, target_version, forge="forgejo")
-                if r and r.get("versions"):
-                    _dbg("[4] homepage-discovered repo: hit")
-                    return r
-                fallback_link = _FORGES["forgejo"]["web_releases"].format(host=found[1], repo=found[2])
-            else:
-                _dbg(f"[4] homepage scan found GitLab repo: {found[1]}/{found[2]}")
-                r = _gitlab_releases(found[1], found[2], pkg.name, target_version)
-                if r and r.get("versions"):
-                    _dbg("[4] homepage-discovered repo: hit")
-                    return r
-                fallback_link = f"https://{found[1]}/{found[2]}/-/releases"
-            _dbg("[4] homepage-discovered repo: no usable data")
-        else:
-            _dbg("[4] homepage scan: no repo link found (or rejected by plausibility check)")
-    else:
-        _dbg("[4] no package URL to scan")
-
-    if local_stale:
-        return _stale_appstream(local_stale)
-
-    if fallback_link:
-        return {
-            "versions": [{"version": pkg.version, "date": "",
-                          "changes": [f"See {fallback_link} for details."]}],
-            "source": "Upstream repo link",
-            "_link_only": True,
-            "_link_url": fallback_link,
-        }
-
-    # 5. AUR cgit fallback (PKGBUILD commit history) — absolute last resort
-    versions = []
-    body = http_get(
-        f"https://aur.archlinux.org/cgit/aur.git/log/"
-        f"?h={urllib.parse.quote(pkg.name)}&showmsg=1")
-    if body:
-        seen: set[str] = set()
-        for subj_html, date_html in re.findall(
-                r'<td class="logsubject">(.*?)</td>.*?<td class="logdate">(.*?)</td>',
-                body, re.DOTALL)[:8]:
-            subj = _strip_html(subj_html).strip()
-            date = _strip_html(date_html).strip()[:10]
-            if not subj or subj in seen or _is_pgp_garbage(subj):
-                continue
-            seen.add(subj)
-            m   = re.search(r"(\d+[\.\d]+-\d+|\d+\.\d+[\.\d]*)", subj)
-            ver = m.group(1) if m else pkg.version
-            versions.append({"version": ver, "date": date, "changes": [subj]})
-            if len(versions) >= 5:
-                break
-
-    if versions:
-        _dbg("[5] AUR cgit log: hit")
-        return {"versions": versions, "source": "AUR cgit log"}
-
-    _dbg("[5] AUR cgit log: no usable data — giving up")
-    return {"versions": [{"version": pkg.version, "date": "",
-                          "changes": ["No commit history found on AUR."]}],
             "source": "unavailable",
             "_manual_check_url": pkg.url or None}
 
@@ -3853,8 +3640,7 @@ def fetch_changelog(pkg: Package) -> dict:
     _dbg(f"Resolving changelog for package={pkg.name!r} repo={pkg.repo!r} "
          f"url={pkg.url!r}")
     try:
-        if   pkg.repo == "pacman":  result = fetch_changelog_pacman(pkg)
-        elif pkg.repo == "aur":     result = fetch_changelog_aur(pkg)
+        if   pkg.repo in ("pacman", "aur"): result = fetch_changelog_native(pkg)
         elif pkg.repo == "flatpak": result = fetch_changelog_flatpak(pkg)
         elif pkg.repo == "snap":    result = fetch_changelog_snap(pkg)
         else:
