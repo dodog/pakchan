@@ -3,13 +3,11 @@
 Pakchan — PAMAC-like package manager for Manjaro/Arch
 with real changelogs for Pacman, AUR, Flatpak, and Snap.
 
-
-
 Requirements:
     sudo pacman -S python-gobject gtk4 libadwaita pacman-contrib
 
 Optional:
-    yay or paru, flatpak, snapd
+    yay or paru, flatpak, snapd, git, vte4
 
 Run:
     python3 pakchan.py
@@ -4027,13 +4025,6 @@ POPULAR_PACMAN_NAMES = [
     "digikam", "shotwell", "darktable", "rawtherapee", "musescore",
     "godot", "syncthing", "nextcloud-client",
 ]
-POPULAR_AUR_NAMES = [
-    "visual-studio-code-bin", "sublime-text-4", "discord", "spotify",
-    "google-chrome", "slack-desktop", "zoom", "postman-bin", "dbeaver",
-    "brave-bin", "opera", "insomnia-bin", "android-studio", "dropbox",
-    "onlyoffice-bin", "bitwarden",
-]
-
 
 class PkgItem(GObject.Object):
 
@@ -4838,24 +4829,6 @@ class PakchanWindow(Adw.ApplicationWindow):
                 pkg = Package(
                     name=name, version="", new_version=info.get("version", "?"),
                     description=info.get("desc", ""), repo="pacman",
-                    license=info.get("license", ""), url=info.get("url", ""),
-                    depends=info.get("depends", ""), installed=False,
-                )
-                self._available_cache[cache_key] = pkg
-            out.append(pkg)
-        aur_infos = _aur_infos([n for n in POPULAR_AUR_NAMES if n not in installed_names])
-        for name in POPULAR_AUR_NAMES:
-            if name in installed_names:
-                continue
-            info = aur_infos.get(name)
-            if not info:
-                continue
-            cache_key = f"aur:{name}"
-            pkg = self._available_cache.get(cache_key)
-            if pkg is None:
-                pkg = Package(
-                    name=name, version="", new_version=info.get("version", "?"),
-                    description=info.get("desc", ""), repo="aur",
                     license=info.get("license", ""), url=info.get("url", ""),
                     depends=info.get("depends", ""), installed=False,
                 )
