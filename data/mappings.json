@@ -18,14 +18,6 @@
       "parser": "text_file",
       "url": "https://gpsd.gitlab.io/gpsd/NEWS"
     },
-    "mkvtoolnix-gui": {
-      "parser": "text_file",
-      "url": "https://codeberg.org/mbunkus/mkvtoolnix/raw/branch/main/NEWS.md"
-    },
-    "xnviewmp": {
-      "parser": "mantisbt",
-      "url": "https://www.xnview.com/mantisbt/changelog_page.php"
-    }
   },
   "forgejo": {
     "manjaro-settings-manager": {
@@ -43,7 +35,11 @@
     "pacman-mirrors": {
       "host": "code.manjaro.org",
       "repo": "applications/pacman-mirrors"
-    },    
+    },  
+    "mkvtoolnix-gui": {
+      "host": "codeberg.org",
+      "repo": "mbunkus/mkvtoolnix"
+    },      
     "mhwd": {
       "host": "code.manjaro.org",
       "repo": "applications/mhwd"
