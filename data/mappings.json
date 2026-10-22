@@ -17,7 +17,7 @@
     "gpsd": {
       "parser": "text_file",
       "url": "https://gpsd.gitlab.io/gpsd/NEWS"
-    },
+    }
   },
   "forgejo": {
     "manjaro-settings-manager": {
