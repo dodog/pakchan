@@ -237,6 +237,7 @@ def _dbg_get() -> list[str]:
 
 # ─── Network / input hardening ────────────────────────────────────────────────
 import errno, http.client, ipaddress, signal, socket, sqlite3, zlib
+import xml.etree.ElementTree as ET
 
 _MAX_HTTP_BYTES     = 8 * 1024 * 1024
 _MAX_AUR_GZ_BYTES   = 128 * 1024 * 1024
@@ -376,6 +377,8 @@ def _incomplete_error(failed: dict) -> dict:
         msg = "No network connection. Connect and press Retry."
     elif failed and set(failed.values()) == {"ratelimit"}:
         msg = f"Request limit reached on {shown}. Retry later."
+        if "api.github.com" in failed:
+            msg += " A GitHub token (menu → GitHub token…) raises the limit."
     elif failed:
         msg = (f"Couldn't reach {shown}, so no changelog could be confirmed. "
                "The site may be down or blocked; retry in a few minutes.")
@@ -388,6 +391,7 @@ def _incomplete_error(failed: dict) -> dict:
 
 _host_lock = threading.Lock()
 _host_down_until: dict[str, float] = {}
+_host_down_kind: dict[str, str] = {}      # why a host is paused: "ratelimit", "error"
 _host_fails: dict[str, tuple[int, float]] = {}
 
 
@@ -399,18 +403,29 @@ def _host_is_down(host: str) -> bool:
         if time.monotonic() < until:
             return True
         del _host_down_until[host]
+        _host_down_kind.pop(host, None)
         return False
+
+
+def _host_pause_info(host: str) -> Optional[tuple]:
+    with _host_lock:
+        until = _host_down_until.get(host)
+        if until is None or time.monotonic() >= until:
+            return None
+        return int(until - time.monotonic()), _host_down_kind.get(host, "error")
 
 
 def _reset_host_state() -> None:
     with _host_lock:
         _host_down_until.clear()
+        _host_down_kind.clear()
         _host_fails.clear()
 
 
 def _mark_host_down(host: str, secs: float, why: str, kind: Optional[str] = None) -> None:
     with _host_lock:
         _host_down_until[host] = time.monotonic() + secs
+        _host_down_kind[host] = kind or "error"
         _host_fails.pop(host, None)
     _note_failed(host, kind)
     _dbg(f"[net] {host}: {why} — skipping it for {int(secs)} s")
@@ -466,8 +481,12 @@ def _guard_request(req) -> str:
     _check_request_url(req)
     host = (urllib.parse.urlsplit(req.full_url).hostname or "").lower()
     if _host_is_down(host):
-        _note_failed(host, "skipped")
-        _dbg(f"[net] {host}: skipped — temporarily marked unavailable (earlier failures or rate limit)")
+        info = _host_pause_info(host)
+        limited = bool(info) and info[1] == "ratelimit"
+        _note_failed(host, "ratelimit" if limited else "skipped")
+        mins = max(1, round(info[0] / 60)) if info else 1
+        _dbg(f"[net] {host}: skipped — paused for another ~{mins} min "
+             f"({'request limit reached' if limited else 'earlier failures'})")
         raise urllib.error.URLError(f"{host} is temporarily marked unavailable")
     ctx = _ctx()
     req._pk_clamped = False
@@ -565,15 +584,130 @@ _BROWSER_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 _BROWSER_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
 
+# Optional GitHub API token
+_GH_TOKEN_RE = re.compile(r"[A-Za-z0-9_.\-]{20,255}")
+_GH_TOKEN_FILE = (Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+                  / "pakchan" / "github_token")
+_GH_SAVED = "Pakchan's GitHub token setting"
+_gh_lock = threading.Lock()
+_gh_token = {"resolved": False, "token": None, "source": "", "rejected": set()}
+
+
+def _github_token_candidates(rejected: set):
+    try:
+        yield _GH_SAVED, _GH_TOKEN_FILE.read_text()[:300].strip()
+    except OSError:
+        pass
+    for var in ("GITHUB_TOKEN", "GH_TOKEN"):
+        yield f"the {var} variable", os.environ.get(var, "").strip()
+    if "gh auth token" not in rejected and cmd_exists("gh"):
+        out, _, rc = _run_group(["gh", "auth", "token"], timeout=5)
+        yield "gh auth token", out.strip() if rc == 0 else ""
+
+
+def _github_token(url: str) -> Optional[str]:
+    """The API token to use for this URL: only for api.github.com"""
+    try:
+        host = urllib.parse.urlsplit(url).hostname
+    except ValueError:
+        return None
+    if host != "api.github.com":
+        return None
+    with _gh_lock:
+        if not _gh_token["resolved"]:
+            rejected = _gh_token["rejected"]
+            token, source = None, ""
+            for src, tok in _github_token_candidates(rejected):
+                if not tok or src in rejected:
+                    continue
+                if not _GH_TOKEN_RE.fullmatch(tok):
+                    _dbg(f"[github] ignoring the token from {src}: it doesn't look like a GitHub token")
+                    continue
+                token, source = tok, src
+                break
+            _gh_token.update(resolved=True, token=token, source=source)
+            _dbg(f"[github] API token: {'from ' + source if token else 'none (60 requests per hour)'}")
+        return _gh_token["token"]
+
+
+def _github_token_rejected(token: str) -> None:
+    """GitHub answered 401 for this token: don't use that source again, try the next one."""
+    with _gh_lock:
+        if _gh_token["token"] != token:
+            return              # another thread already dealt with it
+        source = _gh_token["source"]
+        _gh_token["rejected"].add(source)
+        _gh_token.update(resolved=False, token=None)
+    _dbg(f"[github] the API token from {source} was rejected (HTTP 401) — trying the next source")
+
+
+def _github_token_changed() -> None:
+    """The saved token was replaced or removed."""
+    with _gh_lock:
+        _gh_token["rejected"].discard(_GH_SAVED)
+        _gh_token.update(resolved=False, token=None, source="")
+
+
+def _save_github_token(token: str) -> None:
+    """Keep the token in ~/.config/pakchan/github_token, readable only by the user."""
+    folder = _GH_TOKEN_FILE.parent
+    folder.mkdir(parents=True, exist_ok=True)
+    os.chmod(folder, 0o700)
+    tmp = _GH_TOKEN_FILE.with_name(_GH_TOKEN_FILE.name + ".tmp")
+    tmp.unlink(missing_ok=True)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(token + "\n")
+    os.replace(tmp, _GH_TOKEN_FILE)
+    _github_token_changed()
+
+
+def _remove_github_token() -> None:
+    _GH_TOKEN_FILE.unlink(missing_ok=True)
+    _github_token_changed()
+
+
+def _check_github_token(token: str) -> tuple:
+    req = urllib.request.Request("https://api.github.com/rate_limit", headers={
+        "User-Agent": "Mozilla/5.0", "Accept": "application/json"})
+    req.add_unredirected_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(_read_capped(r))
+        return True, (data.get("resources", {}).get("core", {}).get("limit"))
+    except urllib.error.HTTPError as e:
+        return (False, None) if e.code == 401 else (None, None)
+    except Exception:
+        return None, None
+
+
+def _github_token_status() -> str:
+    """For the About dialog"""
+    with _gh_lock:
+        if _gh_token["token"]:
+            return f"authenticated (token from {_gh_token['source']})"
+        if _gh_token["rejected"]:
+            return (f"rejected by GitHub ({', '.join(sorted(_gh_token['rejected']))}) "
+                    "— anonymous (60 requests/hour)")
+        if not _gh_token["resolved"]:
+            return "not used yet"
+        return "anonymous (60 requests/hour)"
+
 
 def _http_text(url: str, timeout: int, header_sets: list) -> Optional[str]:
     for headers in header_sets:
+        token = _github_token(url)
         try:
             req = urllib.request.Request(
                 url, headers={**headers, "Accept-Language": "en-US,en;q=0.9"})
+            if token:       # an unredirected header: never forwarded if GitHub redirects elsewhere
+                req.add_unredirected_header("Authorization", f"Bearer {token}")
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 return _read_capped(r).decode("utf-8", errors="replace")
         except urllib.error.HTTPError as e:
+            if e.code == 401 and token:
+                _github_token_rejected(token)
+                return _http_text(url, timeout, header_sets)
             if e.code != 406:
                 _dbg(f"[http] HTTP {e.code} for {url[:90]}")
                 return None
@@ -2767,7 +2901,65 @@ def _find_repo_via_homepage(url: str, pkg_name: str = "") -> Optional[tuple]:
     return None
 
 
+def _html_notes_to_changes(html_text: str) -> list[str]:
+    """Release notes as HTML"""
+    out: list[str] = []
+    for m in re.finditer(r"<h[2-4][^>]*>(.*?)</h[2-4]>|<li[^>]*>(.*?)</li>",
+                         html_text, re.DOTALL | re.IGNORECASE):
+        if m.group(1) is not None:
+            text = _strip_html(m.group(1)).strip().rstrip(":")
+            if text and len(out) < 15:
+                out.append(f"[{text}]")
+        else:
+            text = _strip_html(m.group(2)).strip()
+            if text and not text.startswith("http"):
+                out.append(text[:300])
+    if all(c.startswith("[") for c in out):
+        out = []
+        for p in re.findall(r"<p[^>]*>(.*?)</p>", html_text, re.DOTALL | re.IGNORECASE):
+            text = _strip_html(p).strip()
+            if text and not text.startswith("http"):
+                out.append(text[:300])
+            if len(out) >= 4:
+                break
+    return out[:10]
+
+
+def _github_feed_releases(repo: str) -> Optional[dict]:
+    """Releases from the repository's public Atom feed (no api limit) """
+    body = http_get(f"https://github.com/{repo}/releases.atom", timeout=12)
+    if not body or "<!DOCTYPE" in body or "<!ENTITY" in body:
+        return None
+    try:
+        root = ET.fromstring(body)
+    except ET.ParseError:
+        return None
+    ns = {"a": "http://www.w3.org/2005/Atom"}
+    versions = []
+    for entry in root.findall("a:entry", ns):
+        link = entry.find("a:link", ns)
+        m = re.search(r"/releases/tag/([^/?#]+)", link.get("href", "") if link is not None else "")
+        if not m:
+            continue
+        ver = _extract_version_from_tag(urllib.parse.unquote(m.group(1)))
+        changes = _html_notes_to_changes(entry.findtext("a:content", default="", namespaces=ns))
+        versions.append({"version": ver,
+                         "date": entry.findtext("a:updated", default="", namespaces=ns)[:10],
+                         "changes": changes or [f"Release {ver}"]})
+        if len(versions) >= 6:
+            break
+    if not versions:
+        return None
+    _dbg(f"[github] {repo}: releases feed read ({len(versions)} entries, no API request)")
+    return {"versions": versions, "source": f"GitHub Releases — {repo}"}
+
+
 def _github_releases(repo: str, _pkg_name: str) -> Optional[dict]:
+    """Releases of a GitHub repository. API is fallback if the feed can't be read."""
+    r = _github_feed_releases(repo)
+    if r:
+        return r
+    _dbg(f"[github] {repo}: no usable releases feed — trying the API")
     data = http_get_json(f"https://api.github.com/repos/{repo}/releases?per_page=8")
     if data and isinstance(data, list) and data:
         versions = []
@@ -3684,6 +3876,10 @@ def fetch_changelog(pkg: Package) -> dict:
         entry = dict(result)
         entry["_target"] = target
         _cl_cache_set(key, entry)
+    limited = [h for h, kind in ctx.failed.items() if kind == "ratelimit"]
+    if limited:
+        left = max((_host_pause_info(h) or (0, ""))[0] for h in limited)
+        result["_rate_limited"] = {"host": limited[0], "until": time.time() + left}
     result["_debug"] = debug_trace
     return result
 
@@ -3827,6 +4023,7 @@ class PakchanWindow(Adw.ApplicationWindow):
 
         menu = Gio.Menu()
         menu.append("Submit changelog source…", "win.submit_source")
+        menu.append("GitHub token…", "win.github_token")
         menu.append("About Pakchan", "win.about")
         menu_btn.set_menu_model(menu)
         hb.pack_end(menu_btn)
@@ -3839,6 +4036,10 @@ class PakchanWindow(Adw.ApplicationWindow):
         about_action = Gio.SimpleAction.new("about", None)
         about_action.connect("activate", self._on_about)
         self.add_action(about_action)
+
+        token_action = Gio.SimpleAction.new("github_token", None)
+        token_action.connect("activate", self._on_github_token)
+        self.add_action(token_action)
 
         root.append(hb)
 
@@ -4950,6 +5151,29 @@ class PakchanWindow(Adw.ApplicationWindow):
         icon.add_css_class("dim-label")
         return icon
 
+    def _append_rate_limit_hint(self, pkg: Package):
+        """Show when limit, otherwise only a link shows."""
+        info = pkg.changelog.get("_rate_limited")
+        if not info:
+            return
+        host = info.get("host", "")
+        github = host == "api.github.com"
+        where = "GitHub" if github else host
+        mins = round((info.get("until", 0) - time.time()) / 60)
+        if mins >= 1:
+            text = (f"⚠ {where}'s request limit is reached, so this lookup was cut short. "
+                    f"It resets in about {mins} min.")
+        else:
+            text = (f"⚠ {where}'s request limit was reached earlier, so this lookup was "
+                    f"cut short. Press Refresh to try again.")
+        if github:
+            text += " A free GitHub token (menu → GitHub token…) raises the limit."
+        lbl = Gtk.Label(label=text)
+        lbl.add_css_class("stale-warn"); lbl.set_xalign(0)
+        lbl.set_wrap(True); lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        lbl.set_hexpand(True); lbl.set_margin_bottom(4)
+        self.d_box.append(lbl)
+
     def _append_refresh_row(self, pkg: Package):
         ref_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         if pkg.changelog.get("_from_cache"):
@@ -4996,6 +5220,7 @@ class PakchanWindow(Adw.ApplicationWindow):
             link_lbl.set_margin_bottom(4)
             self.d_box.append(link_lbl)
 
+            self._append_rate_limit_hint(pkg)
             self._append_refresh_row(pkg)
 
             self._append_debug_expander(pkg)
@@ -5063,6 +5288,7 @@ class PakchanWindow(Adw.ApplicationWindow):
             unconfirmed_lbl.set_hexpand(True)
             self.d_box.append(unconfirmed_lbl)
 
+        self._append_rate_limit_hint(pkg)
         self._append_refresh_row(pkg)
         self.d_box.append(Gtk.Separator())
 
@@ -5344,12 +5570,98 @@ class PakchanWindow(Adw.ApplicationWindow):
         dlg.set_debug_info(
             f"Installed packages: {n_pkgs}\n"
             f"Changelog mappings: {n_maps}\n"
+            f"GitHub API: {_github_token_status()}\n"
             f"Mappings source: {MAPPINGS_URL}\n"
             f"Cache dir: {CACHE_DIR}\n"
             f"Changelog DB: {CHANGELOG_DB}\n"
             f"Python: {sys.version.split()[0]}\n"
         )
         dlg.present(self)
+
+    def _on_github_token(self, action, param):
+        """Menu: save, replace or remove the token used for GitHub lookups."""
+        have = _GH_TOKEN_FILE.exists()
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        steps = Gtk.Label(label=(
+            "How to get one:\n"
+            "1. Open the link below and log in to GitHub.\n"
+            "2. Leave all the boxes unticked and click “Generate token”.\n"
+            "3. Copy the token (starts with ghp_) and paste it here."))
+        steps.set_xalign(0); steps.set_wrap(True)
+        box.append(steps)
+        link = Gtk.LinkButton.new_with_label(
+            "https://github.com/settings/tokens/new?description=Pakchan",
+            "Create a token on GitHub")
+        link.set_halign(Gtk.Align.START)
+        box.append(link)
+        entry = Gtk.PasswordEntry()
+        entry.set_show_peek_icon(True)
+        entry.set_property("activates-default", True)
+        entry.set_property("placeholder-text", "A token is saved — paste a new one to replace it"
+                           if have else "Paste your token here")
+        box.append(entry)
+        note = Gtk.Label(label=f"Saved in {_GH_TOKEN_FILE}, readable only by you. "
+                               "Pakchan sends it only to GitHub.")
+        note.set_xalign(0); note.set_wrap(True)
+        note.add_css_class("dim-label")
+        box.append(note)
+
+        dlg = Adw.AlertDialog(
+            heading="GitHub token",
+            body=("Usually not necessary. The token increases GitHub's limit from 60 "
+                  "requests per hour to 5000. It needs no permissions."))
+        dlg.set_extra_child(box)
+        dlg.add_response("cancel", "Cancel")
+        if have:
+            dlg.add_response("remove", "Remove token")
+            dlg.set_response_appearance("remove", Adw.ResponseAppearance.DESTRUCTIVE)
+        dlg.add_response("save", "Save")
+        dlg.set_response_appearance("save", Adw.ResponseAppearance.SUGGESTED)
+        dlg.set_default_response("save")
+        dlg.set_close_response("cancel")
+        dlg.connect("response", lambda _d, response: self._on_github_token_response(response, entry))
+        dlg.present(self)
+
+    def _on_github_token_response(self, response: str, entry):
+        if response == "remove":
+            _remove_github_token()
+            self._show_toast("GitHub token removed.")
+            return
+        if response != "save":
+            return
+        token = entry.get_text().strip()
+        if not token:
+            self._show_toast("No token entered — nothing was changed.")
+        elif not _GH_TOKEN_RE.fullmatch(token):
+            self._show_toast("That doesn't look like a GitHub token. Copy the whole token, "
+                             "starting with ghp_ or github_pat_.", timeout=10)
+        else:
+            self._show_toast("Checking the token with GitHub…", timeout=3)
+            threading.Thread(target=self._bg_check_github_token, args=(token,),
+                             daemon=True).start()
+
+    def _bg_check_github_token(self, token: str):
+        ok, limit = _check_github_token(token)
+        GLib.idle_add(self._github_token_checked, token, ok, limit)
+
+    def _github_token_checked(self, token: str, ok, limit):
+        if ok is False:
+            self._show_toast("GitHub rejected this token, so it was not saved. "
+                             "Check your token.", timeout=10)
+            return False
+        try:
+            _save_github_token(token)
+        except OSError as e:
+            self._show_toast(f"Could not save the token: {e}", timeout=10)
+            return False
+        _reset_host_state()         # a rate-limit pause on api.github.com no longer applies
+        if ok:
+            self._show_toast(f"GitHub token saved — {limit} lookups per hour." if limit
+                             else "GitHub token saved.")
+        else:
+            self._show_toast("GitHub token saved, but it could not be checked right now "
+                             "(no connection?).", timeout=10)
+        return False
 
     def _on_submit_source(self, action, param):
         """Open the pakchan web submission page."""
