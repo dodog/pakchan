@@ -1444,6 +1444,34 @@ def _flatpak_appstream_component(app_id: str) -> dict:
     return {}
 
 
+def _release_description_to_changes(desc_html: str) -> list[str]:
+    """Lines of an AppStream release description"""
+    items = re.findall(r"<li[^>]*>(.*?)</li>", desc_html, re.DOTALL)
+    changes = ([_strip_html(i).strip() for i in items if i.strip()] if items
+               else [s.strip() for s in _strip_html(desc_html).split("\n") if s.strip()])
+    return changes[:8]
+
+
+def _appstream_releases_from_xml(xml_text: str, limit: int = 6) -> list[dict]:
+    """The <release> entries of an AppStream XML document, as version/date/changes dicts."""
+    versions = []
+    for attrs, self_closing, body_xml in re.findall(
+            r'<release\b([^>]*?)(/?)>(.*?)(?:</release>|(?=<release|\Z))',
+            xml_text, re.DOTALL)[:limit]:
+        ver_m = re.search(r'version="([^"]+)"', attrs)
+        if not ver_m:
+            continue
+        date_m = re.search(r'date="([^"]+)"', attrs)
+        ver = ver_m.group(1)
+        versions.append({
+            "version": ver,
+            "date": date_m.group(1)[:10] if date_m else "",
+            "changes": (_release_description_to_changes("" if self_closing else body_xml)
+                        or [f"Release {ver}"]),
+        })
+    return versions
+
+
 def _local_appstream_releases(pkg_name: str) -> Optional[dict]:
     """Read release history from a package's local AppStream metainfo XML."""
     search_dirs = [
@@ -1481,37 +1509,13 @@ def _local_appstream_releases(pkg_name: str) -> Optional[dict]:
         except Exception:
             continue
 
-        # Match each <release ...> tag
-        release_blocks = re.findall(
-            r'<release\b([^>]*?)(/?)>(.*?)(?:</release>|(?=<release|\Z))',
-            text, re.DOTALL)
-        if not release_blocks:
-            _dbg(f"[AppStream] {xml_path.name}: no <release> tags found")
+        versions = _appstream_releases_from_xml(text)
+        if not versions:
+            _dbg(f"[AppStream] {xml_path.name}: no <release> entries with a version found")
             continue
-
-        versions = []
-        for attrs, self_closing, body_xml in release_blocks[:6]:
-            ver_m  = re.search(r'version="([^"]+)"', attrs)
-            date_m = re.search(r'date="([^"]+)"', attrs)
-            if not ver_m:
-                continue
-            ver  = ver_m.group(1)
-            date = date_m.group(1)[:10] if date_m else ""
-            body = "" if self_closing else body_xml
-
-            items = re.findall(r'<li[^>]*>(.*?)</li>', body, re.DOTALL)
-            changes = ([_strip_html(i).strip() for i in items if i.strip()]
-                       if items else
-                       [s.strip() for s in _strip_html(body).split("\n") if s.strip()])
-            versions.append({
-                "version": ver,
-                "date": date,
-                "changes": changes[:8] or [f"Release {ver}"],
-            })
-        if versions:
-            _dbg(f"[AppStream] {xml_path.name}: extracted {len(versions)} version(s) ✓")
-            return {"versions": versions,
-                    "source": f"Local AppStream metadata — {xml_path.name}"}
+        _dbg(f"[AppStream] {xml_path.name}: extracted {len(versions)} version(s) ✓")
+        return {"versions": versions,
+                "source": f"Local AppStream metadata — {xml_path.name}"}
 
     return None
 
@@ -2135,21 +2139,27 @@ def _strip_noise_blocks(html: str) -> str:
 
 # ── Release page dispatcher ───────────────────────────────────────────────────
 
-def _fetch_parallel(urls: list[str], timeout: int = 12) -> dict[str, Optional[str]]:
+def _fetch_parallel(urls: list[str], timeout: int = 12, as_json: bool = False,
+                    keep_trace: bool = False) -> dict:
     """Fetch multiple URLs in parallel, return {url: body}."""
     if not urls:
         return {}
-    results: dict[str, Optional[str]] = {}
+    results: dict = {}
     ctx = _ctx()
 
-    def _one(u: str) -> Optional[str]:
+    def _one(u: str):
         _budget_local.ctx = ctx
-        return http_get(u, timeout)
+        _dbg_reset()
+        got = (http_get_json if as_json else http_get)(u, timeout)
+        return got, _dbg_get()
 
     with ThreadPoolExecutor(max_workers=min(len(urls), 6)) as ex:
         futs = {ex.submit(_one, u): u for u in urls}
         for f in as_completed(futs):
-            results[futs[f]] = f.result()
+            results[futs[f]], trace = f.result()
+            if keep_trace:
+                for line in trace:
+                    _dbg(line)
     return results
 
 
@@ -3212,8 +3222,12 @@ def _forge_releases(host: str, repo: str, _pkg_name: str,
 
     fmt = {"host": host, "repo": repo, "enc": urllib.parse.quote(repo, safe="")}
 
+    # 2-4. Releases API, Tags API and the project's default branch
+    urls = {k: spec[k].format(**fmt) for k in ("releases", "tags", "project")}
+    got = _fetch_parallel(list(urls.values()), timeout=14, as_json=True, keep_trace=True)
+    data, tags, project = (got.get(urls[k]) for k in ("releases", "tags", "project"))
+
     # 2. Releases API
-    data = http_get_json(spec["releases"].format(**fmt))
     if data and isinstance(data, list) and data:
         versions = []
         for rel in data:
@@ -3233,7 +3247,6 @@ def _forge_releases(host: str, repo: str, _pkg_name: str,
                 return r
 
     # 3. Tags API
-    tags = http_get_json(spec["tags"].format(**fmt))
     if tags and isinstance(tags, list) and tags:
         candidates = []
         for tag in tags:
@@ -3264,7 +3277,7 @@ def _forge_releases(host: str, repo: str, _pkg_name: str,
                 return r
 
     # 4. NEWS/CHANGELOG file in the repo root
-    r = _consider(_fetch_forge_news_file(host, repo, forge))
+    r = _consider(_fetch_forge_news_file(host, repo, forge, project))
     if r:
         return r
 
@@ -3287,11 +3300,8 @@ def _gitlab_releases(host: str, repo: str, _pkg_name: str,
     return _forge_releases(host, repo, _pkg_name, target_version, forge="gitlab")
 
 
-def _forge_default_branch(host: str, repo: str, forge: str = "gitlab") -> Optional[str]:
-    """Look up the project's actual default branch via the forge's API."""
-    spec = _FORGES[forge]
-    data = http_get_json(spec["project"].format(
-        host=host, repo=repo, enc=urllib.parse.quote(repo, safe="")))
+def _branch_from_project(data) -> Optional[str]:
+    """The default branch named in a forge's project data."""
     if data and isinstance(data, dict):
         db = data.get("default_branch")
         if isinstance(db, str) and re.fullmatch(r"[A-Za-z0-9_./-]+", db):
@@ -3299,12 +3309,13 @@ def _forge_default_branch(host: str, repo: str, forge: str = "gitlab") -> Option
     return None
 
 
-def _fetch_forge_news_file(host: str, repo: str, forge: str = "gitlab") -> Optional[dict]:
+def _fetch_forge_news_file(host: str, repo: str, forge: str = "gitlab",
+                           project=None) -> Optional[dict]:
     """Try NEWS/CHANGELOG files via the forge's raw-file endpoint."""
     spec = _FORGES[forge]
     filenames = ["NEWS", "CHANGELOG", "NEWS.md", "CHANGELOG.md",
                  "CHANGES", "CHANGES.md", "HISTORY", "HISTORY.md"]
-    branch = _forge_default_branch(host, repo, forge) or "main"
+    branch = _branch_from_project(project) or "main"
     urls = [spec["raw"].format(host=host, repo=repo, branch=branch, fname=fname)
             for fname in filenames]
     pages = _fetch_parallel(urls, timeout=10)
@@ -3678,35 +3689,15 @@ def fetch_changelog_flatpak(pkg: Package) -> dict:
             ver  = str(rel.get("version") or "")
             date = str(rel.get("date") or "")[:10]
             desc = str(rel.get("description") or "")
-            items = re.findall(r"<li[^>]*>(.*?)</li>", desc, re.DOTALL)
-            changes = ([_strip_html(i).strip() for i in items if i.strip()]
-                       if items else
-                       [s.strip() for s in _strip_html(desc).split("\n") if s.strip()])
             versions.append({"version": ver, "date": date,
-                             "changes": changes[:8] or [f"Release {ver}"]})
+                             "changes": _release_description_to_changes(desc) or [f"Release {ver}"]})
 
     # 3. Flathub AppStream XML CDN
     if not versions:
         xml = http_get(f"https://dl.flathub.org/repo/appstream/x86_64"
                        f"/{urllib.parse.quote(app_id)}.xml")
         if xml:
-            release_blocks = re.findall(
-                r'<release\b([^>]*?)(/?)>(.*?)(?:</release>|(?=<release|\Z))',
-                xml, re.DOTALL)
-            for attrs, self_closing, body_xml in release_blocks[:6]:
-                ver_m  = re.search(r'version="([^"]+)"', attrs)
-                date_m = re.search(r'date="([^"]+)"', attrs)
-                if not ver_m:
-                    continue
-                ver  = ver_m.group(1)
-                date = date_m.group(1)[:10] if date_m else ""
-                body = "" if self_closing else body_xml
-                items = re.findall(r"<li[^>]*>(.*?)</li>", body, re.DOTALL)
-                changes = ([_strip_html(i).strip() for i in items if i.strip()]
-                           if items else
-                           [s.strip() for s in _strip_html(body).split("\n") if s.strip()])
-                versions.append({"version": ver, "date": date,
-                                 "changes": changes[:8] or [f"Release {ver}"]})
+            versions = _appstream_releases_from_xml(xml)
 
     # 4. Upstream GitHub/GitLab via package URL
     if not versions and pkg.url:
@@ -3916,6 +3907,13 @@ POPULAR_PACMAN_NAMES = [
     "digikam", "shotwell", "darktable", "rawtherapee", "musescore",
     "godot", "syncthing", "nextcloud-client",
 ]
+
+
+def _classify_selection(sel: list) -> tuple:
+    """(installs, removals, updates) among the checked packages."""
+    return ([p for p in sel if not p.installed],
+            [p for p in sel if p.marked_remove],
+            [p for p in sel if p.installed and not p.marked_remove])
 
 
 class PkgItem(GObject.Object):
@@ -4607,9 +4605,7 @@ class PakchanWindow(Adw.ApplicationWindow):
         n = len(checked)
         if not n:
             return "Update (0)"
-        installs  = [p for p in checked if not p.installed]
-        removals  = [p for p in checked if p.marked_remove]
-        updates   = [p for p in checked if p.installed and not p.marked_remove]
+        installs, removals, updates = _classify_selection(checked)
         kinds = sum(bool(g) for g in (installs, removals, updates))
         if kinds > 1:
             return f"Apply ({n})"
@@ -4618,6 +4614,22 @@ class PakchanWindow(Adw.ApplicationWindow):
         if installs:
             return f"Install ({n})"
         return f"Update ({n})"
+
+    def _available_pkg(self, repo: str, name: str, **fields) -> Package:
+        """Not installed Package for a search result. Kept in a cache"""
+        key = f"{repo}:{name}"
+        pkg = self._available_cache.get(key)
+        if pkg is None:
+            pkg = Package(name=name, version="", repo=repo, installed=False, **fields)
+            self._available_cache[key] = pkg
+        return pkg
+
+    def _available_from_info(self, repo: str, name: str, info: dict) -> Package:
+        """A pacman or AUR search result, from its database entry."""
+        return self._available_pkg(
+            repo, name, new_version=info.get("version", "?"),
+            description=info.get("desc", ""), license=info.get("license", ""),
+            url=info.get("url", ""), depends=info.get("depends", ""))
 
     def _find_installable_matches(self, q: str, limit: int = 150) -> list:
         """Search the pacman sync db."""
@@ -4636,20 +4648,8 @@ class PakchanWindow(Adw.ApplicationWindow):
             else:                      continue
             scored.append((rank, len(name), name, info))
         scored.sort(key=lambda t: (t[0], t[1], t[2]))
-        matches = []
-        for _, _, name, info in scored[:limit]:
-            cache_key = f"pacman:{name}"
-            pkg = self._available_cache.get(cache_key)
-            if pkg is None:
-                pkg = Package(
-                    name=name, version="", new_version=info.get("version", "?"),
-                    description=info.get("desc", ""), repo="pacman",
-                    license=info.get("license", ""), url=info.get("url", ""),
-                    depends=info.get("depends", ""), installed=False,
-                )
-                self._available_cache[cache_key] = pkg
-            matches.append(pkg)
-        return matches
+        return [self._available_from_info("pacman", name, info)
+                for _, _, name, info in scored[:limit]]
 
     def _find_installable_flatpak_matches(self, q: str, limit: int = 60) -> list:
         if not q:
@@ -4670,20 +4670,11 @@ class PakchanWindow(Adw.ApplicationWindow):
             else:                                          rank = 4  # flatpak search already filtered — keep, just ranked last
             scored.append((rank, len(app_id), app_id, r))
         scored.sort(key=lambda t: (t[0], t[1], t[2]))
-        matches = []
-        for _, _, app_id, r in scored[:limit]:
-            cache_key = f"flatpak:{app_id}"
-            pkg = self._available_cache.get(cache_key)
-            if pkg is None:
-                pkg = Package(
-                    name=app_id, version="", new_version=r.get("version", "?"),
-                    description=r.get("desc", ""), repo="flatpak",
-                    installed=False, remote=r.get("remote", "flathub"),
-                    icon_name=app_id, display_name=r.get("name", ""),
-                )
-                self._available_cache[cache_key] = pkg
-            matches.append(pkg)
-        return matches
+        return [self._available_pkg(
+                    "flatpak", app_id, new_version=r.get("version", "?"),
+                    description=r.get("desc", ""), remote=r.get("remote", "flathub"),
+                    icon_name=app_id, display_name=r.get("name", ""))
+                for _, _, app_id, r in scored[:limit]]
 
     def _find_installable_aur_matches(self, q: str, limit: int = 150) -> list:
         if not q:
@@ -4694,20 +4685,7 @@ class PakchanWindow(Adw.ApplicationWindow):
             print("[aur-meta] search ran but the AUR index is not built yet "
                   "(background fetch not done, or it failed — check earlier "
                   "[aur-meta] messages above)", file=sys.stderr)
-        matches = []
-        for name, info in found:
-            cache_key = f"aur:{name}"
-            pkg = self._available_cache.get(cache_key)
-            if pkg is None:
-                pkg = Package(
-                    name=name, version="", new_version=info.get("version", "?"),
-                    description=info.get("desc", ""), repo="aur",
-                    license=info.get("license", ""), url=info.get("url", ""),
-                    depends=info.get("depends", ""), installed=False,
-                )
-                self._available_cache[cache_key] = pkg
-            matches.append(pkg)
-        return matches
+        return [self._available_from_info("aur", name, info) for name, info in found]
 
     def _popular_candidates(self) -> list:
         """Popular not-currently-installed apps."""
@@ -4719,17 +4697,7 @@ class PakchanWindow(Adw.ApplicationWindow):
             info = self.pacman_sync_full.get(name)
             if not info:
                 continue
-            cache_key = f"pacman:{name}"
-            pkg = self._available_cache.get(cache_key)
-            if pkg is None:
-                pkg = Package(
-                    name=name, version="", new_version=info.get("version", "?"),
-                    description=info.get("desc", ""), repo="pacman",
-                    license=info.get("license", ""), url=info.get("url", ""),
-                    depends=info.get("depends", ""), installed=False,
-                )
-                self._available_cache[cache_key] = pkg
-            out.append(pkg)
+            out.append(self._available_from_info("pacman", name, info))
         return out
 
     def _pkg_conflicts(self, pkg: Package) -> set:
@@ -5817,9 +5785,9 @@ class PakchanWindow(Adw.ApplicationWindow):
         return False
 
     def _show_confirm(self, sel: list, extra: Optional[list]):
-        all_installs = all(not p.installed for p in sel)
-        any_installs = any(not p.installed for p in sel)
-        removals = [p for p in sel if p.marked_remove]
+        installs, removals, _updates = _classify_selection(sel)
+        all_installs = len(installs) == len(sel)
+        any_installs = bool(installs)
         removal_only = bool(removals) and len(removals) == len(sel)
         if removal_only:
             names = ", ".join(p.name for p in removals[:5])
