@@ -289,6 +289,25 @@
             document.getElementById('fieldUrl').style.display = ['html_page', 'text_file'].includes(type) ? 'block' : 'none';
         });
 
+        // Pre-fill from the app: ?package=name&url=https://project.example
+        (function prefillFromApp() {
+            const q = new URLSearchParams(location.search);
+            const pkg = (q.get('package') || '').trim();
+            const url = (q.get('url') || '').trim();
+            if (pkg) document.getElementById('packageName').value = pkg;
+            if (!url) return;
+            const type = document.getElementById('sourceType');
+            const gh = url.match(/^https?:\/\/(?:www\.)?github\.com\/([^\/#?]+\/[^\/#?]+)/i);
+            if (gh) {
+                type.value = 'github_releases';
+                document.querySelector('#fieldGithub input').value = gh[1].replace(/\.git$/i, '');
+            } else {
+                type.value = 'html_page';
+                document.querySelector('#fieldUrl input').value = url;
+            }
+            type.dispatchEvent(new Event('change'));
+        })();
+
         // Load stats -- count live from the actual sections rather than trusting the
         // stored total_packages field, since that field only gets recalculated by the
         // submission workflow and drifts out of sync after manual edits to mappings.json.
