@@ -4025,12 +4025,41 @@ class PkgItem(GObject.Object):
         self.pkg = pkg
 
 
+# Colour scheme setting
+_THEME_FILE = (Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+               / "pakchan" / "theme")
+_THEMES = ("system", "light", "dark")
+
+
+def _load_theme() -> str:
+    try:
+        theme = _THEME_FILE.read_text()[:20].strip()
+    except OSError:
+        return "system"
+    return theme if theme in _THEMES else "system"
+
+
+def _save_theme(theme: str) -> None:
+    try:
+        _THEME_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _THEME_FILE.write_text(theme + "\n")
+    except OSError as e:
+        _dbg(f"[theme] could not save the setting: {e}")
+
+
+def _apply_theme(theme: str) -> None:
+    scheme = {"light": Adw.ColorScheme.FORCE_LIGHT,
+              "dark":  Adw.ColorScheme.FORCE_DARK}.get(theme, Adw.ColorScheme.DEFAULT)
+    Adw.StyleManager.get_default().set_color_scheme(scheme)
+
+
 class PakchanApp(Adw.Application):
     def __init__(self):
         super().__init__(application_id="sk.mayday.pakchan")
         self.connect("activate", self.on_activate)
 
     def on_activate(self, app):
+        _apply_theme(_load_theme())
         PakchanWindow(application=app).present()
 
 
@@ -4124,6 +4153,11 @@ class PakchanWindow(Adw.ApplicationWindow):
         menu = Gio.Menu()
         menu.append("Submit changelog source…", "win.submit_source")
         menu.append("GitHub token…", "win.github_token")
+        theme_menu = Gio.Menu()
+        theme_menu.append("System", "win.theme::system")
+        theme_menu.append("Light", "win.theme::light")
+        theme_menu.append("Dark", "win.theme::dark")
+        menu.append_submenu("Theme", theme_menu)
         menu.append("About Pakchan", "win.about")
         menu_btn.set_menu_model(menu)
         hb.pack_end(menu_btn)
@@ -4140,6 +4174,11 @@ class PakchanWindow(Adw.ApplicationWindow):
         token_action = Gio.SimpleAction.new("github_token", None)
         token_action.connect("activate", self._on_github_token)
         self.add_action(token_action)
+
+        theme_action = Gio.SimpleAction.new_stateful(
+            "theme", GLib.VariantType.new("s"), GLib.Variant.new_string(_load_theme()))
+        theme_action.connect("activate", self._on_theme)
+        self.add_action(theme_action)
 
         root.append(hb)
 
@@ -5614,6 +5653,14 @@ class PakchanWindow(Adw.ApplicationWindow):
         return False
 
     # ── About & Menu ──────────────────────────────────────────────────────────
+
+    def _on_theme(self, action, param):
+        theme = param.get_string()
+        if theme not in _THEMES:
+            return
+        action.set_state(param)
+        _save_theme(theme)
+        _apply_theme(theme)
 
     def _on_about(self, action, param):
         """Show About dialog."""
