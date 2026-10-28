@@ -2100,16 +2100,53 @@ def _is_md_noise(line: str) -> bool:
             or bool(re.match(r'^\d+(?:[\.\-]\d+)+$', line)))
 
 
+MAX_CHANGES_PER_VERSION = 60   # lines kept per version in text/markdown changelogs
+
+_HEADER_DATE_RE = re.compile(
+    r'\d{4}[-/.]\d{1,2}[-/.]\d{1,2}'
+    r'|\d{1,2}[ .-]+[A-Za-z]{3,9}\.?,?[ .-]+\d{4}'
+    r'|[A-Za-z]{3,9}\.? +\d{1,2}(?:st|nd|rd|th)?,? +\d{4}')
+
+
+def _header_rest_ok(rest: str) -> bool:
+    rest = rest.strip().strip("()[]").strip()
+    return (not rest or rest.upper() in ("TBD", "UNRELEASED")
+            or bool(_HEADER_DATE_RE.fullmatch(rest)))
+
+
+def _header_date(rest: str) -> str:
+    """YYYY-MM-DD from "14 Jan 2026", "30-Dec-2025", "2026-01-14"; "" when unknown."""
+    rest = re.sub(r'(?<=\d)(?:st|nd|rd|th)\b', '', rest.strip().strip("()[]").strip())
+    rest = re.sub(r'[.,\- ]+', ' ', rest)
+    if re.match(r'\d{4} \d{1,2} \d{1,2}$', rest):
+        y, mo, d = rest.split()
+        return f"{y}-{int(mo):02d}-{int(d):02d}"
+    for fmt in ("%d %b %Y", "%d %B %Y", "%b %d %Y", "%B %d %Y"):
+        try:
+            return datetime.strptime(rest, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return ""
+
+
 def _parse_md_changelog(body: str) -> list[str]:
     changes = []
-    for line in body.splitlines():
-        line = line.strip()
+    cont = None   # index of the bullet an indented plain line continues
+    for raw in body.splitlines():
+        line = raw.strip()
         if _is_md_noise(line):
             continue
         if line.startswith(("- ", "* ", "+ ", "• ")):
             text = line[2:].strip()
+            cont = None
             if text and not text.startswith("http"):
-                changes.append(text)
+                if text.endswith(":") and len(text) < 60:
+                    changes.append(f"[{text[:-1].strip()}]")
+                else:
+                    changes.append(text)
+                    cont = len(changes) - 1
+        elif raw[:1].isspace() and cont is not None and not line.startswith("#"):
+            changes[cont] = f"{changes[cont]} {line}"[:400]
         elif line.startswith("### ") and len(changes) < 15:
             changes.append(f"[{line[4:].strip()}]")
         elif line.startswith("## ") and len(changes) < 15:
@@ -2207,8 +2244,8 @@ def _scrape_text_file(body: str) -> Optional[dict]:
     lines = body.splitlines()
 
     ver_header = re.compile(
-        r'^\s*'
-        r'(?:[A-Za-z][\wÀ-ž _-]*?\s+)?'        # optional app name prefix
+        r'^(?!\s)'                              # headers start in column 0
+        r'(?:[A-Za-z][\wÀ-ž_-]*\s+){0,2}'       # optional short app name prefix
         r'(?:version|release|ver(?:zia)?|v\.?)?\s*'  # EN/SK version keyword
         r'[v=\[\-#*_\s]*'
         r'([\d]+\.[\d]+(?:\.[\d]+)?(?:\s*[\w]+)?)'    # version number
@@ -2218,6 +2255,9 @@ def _scrape_text_file(body: str) -> Optional[dict]:
         re.IGNORECASE)
 
     verzia_inline = re.compile(r'\bverzia\s+([\d]+(?:\.[\d]+)+)', re.IGNORECASE)
+    colon_header = re.compile(                   # "3.27.5: 14 Jan 2026", "3.27.6~dev: TBD"
+        r'^(?!\s)(?:[A-Za-z][\w.+-]*\s+)?v?'
+        r'(\d+\.\d+(?:\.\d+)*(?:[~-][A-Za-z]\w*)?)\s*:\s*(.{0,40})$')
 
     current_ver     = None
     current_date    = ""
@@ -2228,11 +2268,20 @@ def _scrape_text_file(body: str) -> Optional[dict]:
             versions.append({
                 "version": current_ver,
                 "date":    current_date,
-                "changes": current_changes[:10],
+                "changes": current_changes[:MAX_CHANGES_PER_VERSION],
             })
 
     for line in lines:
         m = ver_header.match(line)
+        cm = colon_header.match(line)
+        if cm and _header_rest_ok(cm.group(2)):
+            _flush()
+            current_ver     = cm.group(1)
+            current_date    = _header_date(cm.group(2))
+            current_changes = []
+            if len(versions) >= 6:
+                break
+            continue
         if not m:
             if len(line.strip()) < 80:
                 vm = verzia_inline.search(line)
@@ -2261,7 +2310,7 @@ def _scrape_text_file(body: str) -> Optional[dict]:
         if not stripped or re.match(r'^[=\-_]{3,}$', stripped):
             continue
 
-        if stripped[0] in ("-", "*", "+", "•", "·"):
+        if stripped[0] in ("-", "*", "+", "•", "·") and stripped[1:2] in (" ", "\t"):
             text = stripped[1:].strip()
             if text and len(text) > 3:
                 current_changes.append(text)
@@ -2304,7 +2353,7 @@ def _scrape_github_raw_changelog(body: str) -> Optional[dict]:
         date = _normalize_date_str(dm.group(0)) if dm else ""
         changes = _parse_md_changelog(block)
         versions.append({"version": ver, "date": date,
-                         "changes": changes[:10] or [f"Release {ver}"]})
+                         "changes": changes[:MAX_CHANGES_PER_VERSION] or [f"Release {ver}"]})
         if len(versions) >= 6:
             break
     if versions:
@@ -2591,21 +2640,62 @@ def _extract_generic_block_changes(block_html: str) -> list[str]:
     return changes[:10]
 
 
+_HEADING_NOT_RELEASE_RE = re.compile(
+    r'\b(?:pending\s+removal|porting\s+to|removals?\s+in|removed\s+in|deprecated\s+in)\b',
+    re.IGNORECASE)
+_HIGHLIGHTS_HEADING_RE = re.compile(r'highlights|^summary\b', re.IGNORECASE)
+_BLOCK_MAX_LINES = 30
+
+
+def _block_in_order(block_html: str) -> list[str]:
+    """Paragraphs and list items of a section in page order"""
+    lines = []
+    for tag, inner in re.findall(r'<(p|li)\b[^>]*>(.*?)</\1>', block_html, re.DOTALL | re.IGNORECASE):
+        text = re.sub(r'\s+', ' ', _strip_html(inner)).strip()
+        if not 5 < len(text) < 400 or "{" in text or "function(" in text:
+            continue
+        if tag.lower() == "p" and text.endswith(":") and len(text) < 60:
+            text = f"[{text[:-1].strip()}]"
+        lines.append(text)
+    return lines[:_BLOCK_MAX_LINES]
+
+
 def _scrape_headings_for_versions(html_text: str) -> list[dict]:
-    """Strategy 1: repeating h1-h4 headings, each naming a version."""
     matches = list(_GENERIC_HEADING_RE.finditer(html_text))
+    texts = [_strip_html(m.group(2)).strip(" \u00b6") for m in matches]
     versions = []
     for i, m in enumerate(matches):
-        heading_text = _strip_html(m.group(2))
+        heading_text = texts[i]
+        if _HEADING_NOT_RELEASE_RE.search(heading_text):
+            continue
         vm = _GENERIC_VERSION_IN_TEXT_RE.search(heading_text)
         if not vm:
             continue
         ver = vm.group(1)
+        if any(v["version"] == ver and _is_meaningful_changelog(v["changes"]) for v in versions):
+            continue
         dm  = _GENERIC_DATE_RE.search(heading_text)
         date = _normalize_date_str(dm.group(0)) if dm else ""
         start = m.end()
         end   = matches[i + 1].start() if i + 1 < len(matches) else len(html_text)
         changes = _extract_generic_block_changes(html_text[start:end])
+        nxt = i + 1
+        if nxt < len(matches) and _HIGHLIGHTS_HEADING_RE.search(texts[nxt]):
+            stop = matches[nxt + 1].start() if nxt + 1 < len(matches) else len(html_text)
+            highlights = _block_in_order(html_text[matches[nxt].end():stop])
+            if highlights:
+                upd = re.search(r'\bUpdate\s+\d+(?:\.\d+)+\s*:[^\n]{0,200}',
+                                _strip_html(html_text[start:end]))
+                changes = ([upd.group(0).strip()] if upd else []) + [f"[{texts[nxt]}]"] + highlights
+        elif not changes:
+            level = int(m.group(1)[1])
+            j = i + 1
+            while (j < len(matches) and int(matches[j].group(1)[1]) > level
+                   and not _GENERIC_VERSION_IN_TEXT_RE.search(texts[j])):
+                j += 1
+            if j > i + 1:
+                stop = matches[j].start() if j < len(matches) else len(html_text)
+                changes = _block_in_order(html_text[start:stop])
         versions.append({"version": ver, "date": date,
                          "changes": changes or [f"Release {ver}"]})
     return versions
@@ -2622,10 +2712,13 @@ def _scrape_bold_or_dt_for_versions(html_text: str) -> list[dict]:
         if not vm:
             continue
         ver = vm.group(1)
-        dm = _GENERIC_DATE_RE.search(text)
+        dm = (_GENERIC_DATE_RE.search(text)
+              or _GENERIC_DATE_RE.search(_strip_html(html_text[m.end():m.end() + 120])))   # "(released September 22 2026)"
         date = _normalize_date_str(dm.group(0)) if dm else ""
         start = m.end()
-        end = matches[i + 1].start() if i + 1 < len(matches) else min(start + 4000, len(html_text))
+        nxt = next((n for n in matches[i + 1:]
+                    if _GENERIC_VERSION_IN_TEXT_RE.search(_strip_html(n.group(2)))), None)
+        end = nxt.start() if nxt else min(start + 4000, len(html_text))
         changes = _extract_generic_block_changes(html_text[start:end])
         versions.append({"version": ver, "date": date,
                          "changes": changes or [f"Release {ver}"]})
@@ -2678,6 +2771,15 @@ def _generic_release_page_scraper(url: str, pkg_name: str) -> Optional[dict]:
     clean = _strip_noise_blocks(body)
 
     versions = _scrape_headings_for_versions(clean)
+    # One heading for the whole series
+    refine = []
+    if versions:
+        alt = _scrape_bold_or_dt_for_versions(clean)
+        if (len(alt) > len(versions) and _has_meaningful_entry(alt)
+                and any(a["version"].startswith(h["version"] + ".") for h in versions for a in alt)):
+            refine = alt
+    if refine:
+        versions = refine
     if not _has_meaningful_entry(versions):
         alt = _scrape_bold_or_dt_for_versions(clean)
         if _has_meaningful_entry(alt):
