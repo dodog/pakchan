@@ -962,9 +962,9 @@ def _pending_flatpak_updates_online() -> Optional[dict]:
 def check_updates_online(aur_helper: Optional[str]) -> dict:
     """Run the online checks in parallel. {"pacman"|"aur"|"flatpak": dict | None}."""
     jobs = {"pacman": _pending_pacman_updates_online}
-    if aur_helper:
+    if aur_helper and _setting("source_aur"):
         jobs["aur"] = lambda: _pending_aur_updates_online(aur_helper)
-    if cmd_exists("flatpak"):
+    if cmd_exists("flatpak") and _setting("source_flatpak"):
         jobs["flatpak"] = _pending_flatpak_updates_online
 
     def _safe(fn):
@@ -1371,9 +1371,11 @@ def get_all_packages_fast() -> tuple[list, dict, bool]:
 
     with ThreadPoolExecutor(max_workers=3) as ex:
         f_pacaur  = ex.submit(_load_pacman_aur, local_db, sync_names, aur_helper, sync_full)
-        f_flatpak = ex.submit(_load_flatpak)
-        f_snap    = ex.submit(_load_snap)
+        f_flatpak = ex.submit(_load_flatpak if _setting("source_flatpak") else list)
+        f_snap    = ex.submit(_load_snap if _setting("source_snap") else list)
         pacaur_pkgs, _, _ = f_pacaur.result()
+        if not _setting("source_aur"):
+            pacaur_pkgs = [p for p in pacaur_pkgs if p.repo != "aur"]
         flatpak_pkgs      = f_flatpak.result()
         snap_pkgs         = f_snap.result()
 
@@ -1573,7 +1575,84 @@ MAPPINGS_URL   = "https://raw.githubusercontent.com/dodog/pakchan/refs/heads/mai
 CACHE_DIR      = Path.home() / ".cache" / "pakchan"
 MAPPINGS_CACHE = CACHE_DIR / "mappings.json"
 CHANGELOG_DB   = CACHE_DIR / "changelogs.json"
-CL_MAX_AGE_S   = 7 * 86400   # 7 days — fix #6
+# ─── Settings (~/.config/pakchan/settings.json) ───────────────────────────────
+
+_SETTINGS_FILE = (Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+                  / "pakchan" / "settings.json")
+_THEMES      = ("system", "light", "dark")
+_START_PAGES = ("all", "installed", "pacman", "aur", "flatpak", "snap", "updates")
+_SOURCE_SETTINGS = {"aur": "source_aur", "flatpak": "source_flatpak", "snap": "source_snap"}
+SETTING_DEFAULTS = {
+    "theme": "system", "start_page": "installed", "start_sort": "Relevance",
+    "cache_days": 7,
+    "max_versions": 0, "max_lines": 0,      # 0 = each source's own default
+    "source_aur": True, "source_flatpak": True, "source_snap": True,
+}
+_settings_data: Optional[dict] = None
+
+
+def _valid_setting(key: str, value) -> bool:
+    if key == "theme":      return value in _THEMES
+    if key == "start_page": return value in _START_PAGES
+    if key == "start_sort": return value in SORT_OPTIONS
+    if key in ("cache_days", "max_versions", "max_lines"):
+        low  = 1 if key == "cache_days" else 0
+        high = {"cache_days": 365, "max_versions": 50, "max_lines": 500}[key]
+        return isinstance(value, int) and not isinstance(value, bool) and low <= value <= high
+    return isinstance(value, bool)
+
+
+def _settings() -> dict:
+    global _settings_data
+    if _settings_data is None:
+        try:
+            saved = json.loads(_SETTINGS_FILE.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            saved = {}
+        if not isinstance(saved, dict):
+            saved = {}
+        if "theme" not in saved:        # the first version kept the theme in its own file
+            try:
+                saved["theme"] = (_SETTINGS_FILE.parent / "theme").read_text()[:20].strip()
+            except OSError:
+                pass
+        _settings_data = {k: (saved[k] if k in saved and _valid_setting(k, saved[k]) else d)
+                          for k, d in SETTING_DEFAULTS.items()}
+    return _settings_data
+
+
+def _setting(key: str):
+    return _settings()[key]
+
+
+def _set_setting(key: str, value) -> None:
+    if key not in SETTING_DEFAULTS or not _valid_setting(key, value):
+        return
+    _settings()[key] = value
+    try:
+        _SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _SETTINGS_FILE.write_text(json.dumps(_settings(), indent=2) + "\n", encoding="utf-8")
+    except OSError as e:
+        _dbg(f"[settings] could not save: {e}")
+
+
+def _start_page() -> str:
+    """The page to open with; a page of a turned-off source falls back to Installed."""
+    page = _setting("start_page")
+    off = _SOURCE_SETTINGS.get(page)
+    return "installed" if off and not _setting(off) else page
+
+
+def _max_versions(default: int = 6) -> int:
+    return _setting("max_versions") or default
+
+
+def _max_lines(default: int = 10) -> int:
+    return _setting("max_lines") or default
+
+
+def _cl_max_age() -> float:
+    return _setting("cache_days") * 86400
 
 # AUR's full metadata dump, cached locally
 AUR_META_URL       = "https://aur.archlinux.org/packages-meta-ext-v1.json.gz"
@@ -2062,13 +2141,13 @@ def _cl_db_flush(force: bool = False):
 
 
 def _cl_cache_get(key: str) -> Optional[dict]:
-    """Fix #6: Return None if entry older than CL_MAX_AGE_S."""
+    """Fix #6: entries older than the cache lifetime setting are marked stale."""
     entry = _CL_DB.get(key)
     if not entry:
         return None
     fetched_at = entry.get("_fetched_at", 0)
     age = time.time() - fetched_at
-    if age > CL_MAX_AGE_S:
+    if age > _cl_max_age():
         entry["_stale"] = True   # mark stale but still return for display
     return entry
 
@@ -2081,6 +2160,20 @@ def _cl_cache_set(key: str, data: dict):
     _CL_DB[key] = data
     _cl_dirty = True
     _cl_db_flush()
+
+
+def _cl_cache_clear() -> int:
+    """Forget every saved changelog; returns how many results were dropped."""
+    global _CL_DB, _cl_dirty
+    with _cl_save_lock:
+        count = len(_CL_DB)
+        _CL_DB = {}
+        _cl_dirty = False
+        try:
+            CHANGELOG_DB.unlink()
+        except OSError:
+            pass
+    return count
 
 
 # ─── HTML helpers ─────────────────────────────────────────────────────────────
@@ -2099,8 +2192,6 @@ def _is_md_noise(line: str) -> bool:
             or bool(re.match(r'^(version\b|v\b)\s*\d', line.lower()))
             or bool(re.match(r'^\d+(?:[\.\-]\d+)+$', line)))
 
-
-MAX_CHANGES_PER_VERSION = 60   # lines kept per version in text/markdown changelogs
 
 _HEADER_DATE_RE = re.compile(
     r'\d{4}[-/.]\d{1,2}[-/.]\d{1,2}'
@@ -2268,7 +2359,7 @@ def _scrape_text_file(body: str) -> Optional[dict]:
             versions.append({
                 "version": current_ver,
                 "date":    current_date,
-                "changes": current_changes[:MAX_CHANGES_PER_VERSION],
+                "changes": current_changes[:_max_lines(60)],
             })
 
     for line in lines:
@@ -2279,7 +2370,7 @@ def _scrape_text_file(body: str) -> Optional[dict]:
             current_ver     = cm.group(1)
             current_date    = _header_date(cm.group(2))
             current_changes = []
-            if len(versions) >= 6:
+            if len(versions) >= _max_versions():
                 break
             continue
         if not m:
@@ -2291,7 +2382,7 @@ def _scrape_text_file(body: str) -> Optional[dict]:
                     current_ver     = vm.group(1)
                     current_date    = (date_m.group(1) if date_m else "")[:10]
                     current_changes = []
-                    if len(versions) >= 6:
+                    if len(versions) >= _max_versions():
                         break
                     continue
         if m and m.group(1):
@@ -2299,7 +2390,7 @@ def _scrape_text_file(body: str) -> Optional[dict]:
             current_ver     = m.group(1).strip()
             current_date    = (m.group(2) or "")[:10]
             current_changes = []
-            if len(versions) >= 6:
+            if len(versions) >= _max_versions():
                 break
             continue
 
@@ -2353,8 +2444,8 @@ def _scrape_github_raw_changelog(body: str) -> Optional[dict]:
         date = _normalize_date_str(dm.group(0)) if dm else ""
         changes = _parse_md_changelog(block)
         versions.append({"version": ver, "date": date,
-                         "changes": changes[:MAX_CHANGES_PER_VERSION] or [f"Release {ver}"]})
-        if len(versions) >= 6:
+                         "changes": changes[:_max_lines(60)] or [f"Release {ver}"]})
+        if len(versions) >= _max_versions():
             break
     if versions:
         return {"versions": versions, "source": "GitHub raw changelog"}
@@ -2393,7 +2484,7 @@ def _scrape_mozilla(url: str, body: str, pkg_name: str = "", target_version: str
             _dbg(f"[mozilla] target version {stripped_target!r} not in the "
                  f"top-N-by-date window — adding it explicitly")
             items = [(target_key, releases[target_key])] + items
-            items = items[:6]
+            items = items[:_max_versions()]
         if not items:
             _dbg(f"[mozilla] product-details JSON: fetched OK but 0 matching "
                  f"releases (got {len(releases)} raw entries, is_esr={is_esr})")
@@ -2426,7 +2517,7 @@ def _scrape_mozilla(url: str, body: str, pkg_name: str = "", target_version: str
                     _dbg(f"[mozilla] {ver}: page fetched but parser found "
                          f"0 change entries (page len={len(notes)})")
                 versions.append({"version": ver, "date": date,
-                                  "changes": changes[:10] or [f"Release {ver}"]})
+                                  "changes": changes[:_max_lines()] or [f"Release {ver}"]})
             if versions:
                 return {"versions": versions,
                         "source": "Mozilla product-details + release notes"}
@@ -2452,7 +2543,7 @@ def _scrape_mozilla(url: str, body: str, pkg_name: str = "", target_version: str
         notes   = pages.get(note_url) or ""
         changes = _parse_mozilla_notes(notes)
         versions.append({"version": ver, "date": "",
-                         "changes": changes[:10] or [f"Release {ver}"]})
+                         "changes": changes[:_max_lines()] or [f"Release {ver}"]})
     return {"versions": versions, "source": "Mozilla release notes"} if versions else None
 
 
@@ -2504,7 +2595,7 @@ def _parse_mozilla_notes(html_text: str) -> list[str]:
             if _mozilla_text_ok(text) and text not in changes:
                 changes.append(text)
     if changes:
-        return changes[:12]
+        return changes[:_max_lines(12)]
 
     # Step 4: Look for section headings + their list items
     sections = re.findall(
@@ -2535,7 +2626,7 @@ def _parse_mozilla_notes(html_text: str) -> list[str]:
             if _mozilla_text_ok(text) and not re.search(r'fill:|behavior:|url\(', text):
                 changes.append(text)
 
-    return changes[:12]
+    return changes[:_max_lines(12)]
 
 
 def _scrape_filezilla_changelog(body: str, url: str) -> Optional[dict]:
@@ -2582,7 +2673,7 @@ def _scrape_filezilla_changelog(body: str, url: str) -> Optional[dict]:
                             if s:
                                 changes.append(s)
             if changes:
-                versions.append({"version": ver, "date": date, "changes": changes[:10]})
+                versions.append({"version": ver, "date": date, "changes": changes[:_max_lines()]})
         return {"versions": versions, "source": f"FileZilla feed — {url}"} if versions else None
 
     # Otherwise fall back to site scraping: look for list items or paragraphs
@@ -2591,7 +2682,7 @@ def _scrape_filezilla_changelog(body: str, url: str) -> Optional[dict]:
         # Use the first group of list items as a loose changelog
         changes = [_strip_html(li).strip() for li in lis[:12] if _strip_html(li).strip()]
         if changes:
-            return {"versions": [{"version": "latest", "date": "", "changes": changes[:10]}],
+            return {"versions": [{"version": "latest", "date": "", "changes": changes[:_max_lines()]}],
                     "source": f"FileZilla changelog page — {url}"}
 
     return None
@@ -2637,14 +2728,13 @@ def _extract_generic_block_changes(block_html: str) -> list[str]:
     changes = [c for c in changes
                if 5 < len(c) < 400 and "{" not in c and "function(" not in c
                and len(c.split()) >= 2]
-    return changes[:10]
+    return changes[:_max_lines()]
 
 
 _HEADING_NOT_RELEASE_RE = re.compile(
     r'\b(?:pending\s+removal|porting\s+to|removals?\s+in|removed\s+in|deprecated\s+in)\b',
     re.IGNORECASE)
 _HIGHLIGHTS_HEADING_RE = re.compile(r'highlights|^summary\b', re.IGNORECASE)
-_BLOCK_MAX_LINES = 30
 
 
 def _block_in_order(block_html: str) -> list[str]:
@@ -2657,7 +2747,7 @@ def _block_in_order(block_html: str) -> list[str]:
         if tag.lower() == "p" and text.endswith(":") and len(text) < 60:
             text = f"[{text[:-1].strip()}]"
         lines.append(text)
-    return lines[:_BLOCK_MAX_LINES]
+    return lines[:_max_lines(30)]
 
 
 def _scrape_headings_for_versions(html_text: str) -> list[dict]:
@@ -2791,7 +2881,7 @@ def _generic_release_page_scraper(url: str, pkg_name: str) -> Optional[dict]:
 
     if _has_meaningful_entry(versions):
         versions.sort(key=lambda v: _tag_selection_key(v.get("version", "")), reverse=True)
-        return {"versions": versions[:8], "source": f"Release notes (auto-detected) — {url}"}
+        return {"versions": versions[:_max_versions(8)], "source": f"Release notes (auto-detected) — {url}"}
 
     # index of links to per-version pages
     index_links = _scrape_index_links_for_versions(clean)
@@ -2817,7 +2907,7 @@ def _generic_release_page_scraper(url: str, pkg_name: str) -> Optional[dict]:
                 sub_versions = [{"version": newest_ver, "date": "", "changes": changes}]
         if _has_meaningful_entry(sub_versions):
             sub_versions.sort(key=lambda v: _tag_selection_key(v.get("version", "")), reverse=True)
-            return {"versions": sub_versions[:8],
+            return {"versions": sub_versions[:_max_versions(8)],
                     "source": f"Release notes (auto-detected, followed index link) — {sub_url}"}
     return None
 
@@ -3034,7 +3124,7 @@ def _html_notes_to_changes(html_text: str) -> list[str]:
                 out.append(text[:300])
             if len(out) >= 4:
                 break
-    return out[:10]
+    return out[:_max_lines()]
 
 
 def _github_feed_releases(repo: str) -> Optional[dict]:
@@ -3058,7 +3148,7 @@ def _github_feed_releases(repo: str) -> Optional[dict]:
         versions.append({"version": ver,
                          "date": entry.findtext("a:updated", default="", namespaces=ns)[:10],
                          "changes": changes or [f"Release {ver}"]})
-        if len(versions) >= 6:
+        if len(versions) >= _max_versions():
             break
     if not versions:
         return None
@@ -3075,12 +3165,12 @@ def _github_releases(repo: str, _pkg_name: str) -> Optional[dict]:
     data = http_get_json(f"https://api.github.com/repos/{repo}/releases?per_page=8")
     if data and isinstance(data, list) and data:
         versions = []
-        for rel in data[:6]:
+        for rel in data[:_max_versions()]:
             ver  = _extract_version_from_tag(rel.get("tag_name") or "")
             date = (rel.get("published_at") or "")[:10]
             body = rel.get("body") or ""
             versions.append({"version": ver, "date": date,
-                             "changes": _parse_md_changelog(body)[:10] or [f"Release {ver}"]})
+                             "changes": _parse_md_changelog(body)[:_max_lines()] or [f"Release {ver}"]})
         if versions:
             return {"versions": versions, "source": f"GitHub Releases — {repo}"}
 
@@ -3089,7 +3179,7 @@ def _github_releases(repo: str, _pkg_name: str) -> Optional[dict]:
     if data and isinstance(data, list) and data:
         return {"versions": [{"version": _extract_version_from_tag(t.get("name") or ""),
                               "date": "", "changes": ["See GitHub for release notes."]}
-                             for t in data[:6]],
+                             for t in data[:_max_versions()]],
                 "source": f"GitHub tags — {repo}"}
     return None
 
@@ -3340,9 +3430,9 @@ def _forge_releases(host: str, repo: str, _pkg_name: str,
             desc = rel.get(spec["rel_notes"]) or ""
             changes = _parse_md_changelog(desc)
             versions.append({"version": ver, "date": date,
-                             "changes": changes[:10] or [desc[:120].replace("\n"," ")] or [f"Release {ver}"]})
+                             "changes": changes[:_max_lines()] or [desc[:120].replace("\n"," ")] or [f"Release {ver}"]})
         _sort_versions_newest_first(versions)
-        versions = versions[:6]
+        versions = versions[:_max_versions()]
         if any(_is_meaningful_changelog(v.get("changes", [])) for v in versions):
             r = _consider({"versions": versions, "source": f"{label} Releases — {host}/{repo}"})
             if r:
@@ -3372,7 +3462,7 @@ def _forge_releases(host: str, repo: str, _pkg_name: str,
                     "changes": changes[:8],
                 })
         _sort_versions_newest_first(candidates)
-        candidates = candidates[:6]
+        candidates = candidates[:_max_versions()]
         if any(_is_meaningful_changelog(v.get("changes", [])) for v in candidates):
             r = _consider({"versions": candidates, "source": f"{label} tags — {host}/{repo}"})
             if r:
@@ -3487,7 +3577,7 @@ def _gitlab_git_fallback(host: str, repo: str, _pkg_name: str,
 
     # Reuse the shared version-sort key instead of a separate local copy
     tags.sort(key=lambda tr: _tag_selection_key(tr[0]), reverse=True)
-    tags = tags[:6]
+    tags = tags[:_max_versions()]
     versions = []
     with tempfile.TemporaryDirectory(prefix="pakchan-git-") as tmpdir:
         if run_git(["git", "init", "--bare", "--quiet", tmpdir], timeout=_t(5))[2] != 0:
@@ -3517,7 +3607,7 @@ def _gitlab_git_fallback(host: str, repo: str, _pkg_name: str,
             if date_rc != 0 or body_rc != 0:
                 continue
             date = date_out.strip().splitlines()[0] if date_out.strip() else ""
-            raw_changes = _parse_md_changelog(body_out)[:10]
+            raw_changes = _parse_md_changelog(body_out)[:_max_lines()]
             # Filter out noisy lines from parsed changes
             if raw_changes:
                 raw_changes = [c for c in raw_changes if not _is_noise_line(c)]
@@ -3539,7 +3629,7 @@ def _gitlab_git_fallback(host: str, repo: str, _pkg_name: str,
                     "date": date,
                     "changes": raw_changes,
                 })
-            if len(versions) >= 6:
+            if len(versions) >= _max_versions():
                 break
     if versions:
         return {"versions": versions,
@@ -3786,7 +3876,7 @@ def fetch_changelog_flatpak(pkg: Package) -> dict:
             pkg.url = urls.get("homepage") or urls.get("Homepage") or ""
         if not pkg.description:
             pkg.description = data.get("summary") or ""
-        for rel in (data.get("releases") or [])[:6]:
+        for rel in (data.get("releases") or [])[:_max_versions()]:
             if not isinstance(rel, dict): continue
             ver  = str(rel.get("version") or "")
             date = str(rel.get("date") or "")[:10]
@@ -3895,7 +3985,7 @@ def fetch_changelog_snap(pkg: Package) -> dict:
 
 def _cache_usable(cached: dict, target: str) -> bool:
     if cached.get("_stale"):
-        return False                            # older than CL_MAX_AGE_S
+        return False                            # older than the cache lifetime
     looked_up_for = cached.get("_target")
     if looked_up_for is not None:
         return looked_up_for == target          # package updated or a new update appeared
@@ -3979,7 +4069,7 @@ def fetch_changelog(pkg: Package) -> dict:
 
 # ─── GTK Application ──────────────────────────────────────────────────────────
 
-def _resolve_source_url(changelog: dict) -> Optional[str]:
+def _resolve_source_url(changelog: dict, pkg=None) -> Optional[str]:
     """Best-effort extraction of a real URL for the "Source:" line."""
     if changelog.get("_link_url"):
         return changelog["_link_url"]
@@ -3993,10 +4083,69 @@ def _resolve_source_url(changelog: dict) -> Optional[str]:
     m = re.search(r'(?:GitLab|Forgejo)[^—]*—\s*([\w.\-]+)/([\w.\-]+/[\w.\-]+)', source)
     if m:
         return f"https://{m.group(1)}/{m.group(2)}"
+    if pkg is not None and source not in ("unavailable", "error"):
+        # Sources named without a link: the store page, else the project's homepage
+        if source.startswith("Flathub"):
+            return f"https://flathub.org/apps/{urllib.parse.quote(pkg.name)}"
+        if source.startswith("Snap Store"):
+            return f"https://snapcraft.io/{urllib.parse.quote(pkg.name)}"
+        if pkg.url:
+            return pkg.url
     return None
 
 
+_PLACEHOLDER_RE = re.compile(
+    r'^(changelog not found|release notes not available|see github for release notes|release\s+\S+$)',
+    re.IGNORECASE)
+
+
+def _changelog_missing(changelog: dict) -> bool:
+    """True when the lookup found no real release notes (only a placeholder line)."""
+    if changelog.get("source") == "unavailable":
+        return True
+    if changelog.get("_link_only"):
+        return False
+    lines = [c.strip() for v in changelog.get("versions", []) if isinstance(v, dict)
+             for c in v.get("changes", []) if isinstance(c, str)]
+    return all(_PLACEHOLDER_RE.match(c) for c in lines)
+
+
+SUBMIT_PAGE_URL = "https://dodog.github.io/pakchan/web/"
+ISSUES_NEW_URL  = "https://github.com/dodog/pakchan/issues/new"
+ISSUES_URL      = "https://github.com/dodog/pakchan/issues"
+
+
+def _submit_source_url(pkg) -> str:
+    """The web form, with the package name (and its homepage) filled in."""
+    query = {"package": pkg.name}
+    if pkg.url:
+        query["url"] = pkg.url
+    return SUBMIT_PAGE_URL + "?" + urllib.parse.urlencode(query)
+
+
+def _report_changelog_url(pkg, changelog: dict) -> str:
+    """A pre-filled GitHub issue about a changelog that looks wrong."""
+    source = changelog.get("source", "") or "unknown"
+    link   = _resolve_source_url(changelog, pkg) or "-"
+    shown  = pkg.version + (f" -> {pkg.new_version}" if pkg.new_version else "")
+    body = "\n".join([
+        f"### Package: {pkg.name}", "",
+        f"- Repository: {pkg.repo}",
+        f"- Version: {shown}",
+        f"- Pakchan used: {source}",
+        f"- Source link: {link}",
+        f"- Homepage: {pkg.url or '-'}", "",
+        "**What is wrong?** (missing, cut off, wrong version, wrong project, ...)", "", "",
+        "**Where is the correct changelog?** (repository, release page or NEWS file URL)", "", ""])
+    return ISSUES_NEW_URL + "?" + urllib.parse.urlencode(
+        {"title": f"Wrong changelog: {pkg.name}", "body": body})
+
+
 SORT_OPTIONS = ["Relevance", "A → Z", "Z → A", "Size ↓", "Size ↑", "Updates first"]
+
+# Icon beside each package-source badge
+_REPO_ICONS = {"pacman": "system-software-update-symbolic", "aur": "applications-development-symbolic",
+               "flatpak": "application-x-executable-symbolic", "snap": "package-x-generic-symbolic"}
 
 # Curated list of well-known apps to fill the "All" tab
 POPULAR_PACMAN_NAMES = [
@@ -4025,32 +4174,13 @@ class PkgItem(GObject.Object):
         self.pkg = pkg
 
 
-# Colour scheme setting
-_THEME_FILE = (Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
-               / "pakchan" / "theme")
-_THEMES = ("system", "light", "dark")
-
-
-def _load_theme() -> str:
-    try:
-        theme = _THEME_FILE.read_text()[:20].strip()
-    except OSError:
-        return "system"
-    return theme if theme in _THEMES else "system"
-
-
-def _save_theme(theme: str) -> None:
-    try:
-        _THEME_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _THEME_FILE.write_text(theme + "\n")
-    except OSError as e:
-        _dbg(f"[theme] could not save the setting: {e}")
-
-
 def _apply_theme(theme: str) -> None:
+    """Follow the system or force the light / dark colour scheme."""
     scheme = {"light": Adw.ColorScheme.FORCE_LIGHT,
               "dark":  Adw.ColorScheme.FORCE_DARK}.get(theme, Adw.ColorScheme.DEFAULT)
     Adw.StyleManager.get_default().set_color_scheme(scheme)
+
+
 
 
 class PakchanApp(Adw.Application):
@@ -4059,7 +4189,7 @@ class PakchanApp(Adw.Application):
         self.connect("activate", self.on_activate)
 
     def on_activate(self, app):
-        _apply_theme(_load_theme())
+        _apply_theme(_setting("theme"))
         PakchanWindow(application=app).present()
 
 
@@ -4078,8 +4208,8 @@ class PakchanWindow(Adw.ApplicationWindow):
         self._update_busy    = False
         self._update_pending = False
         self.current_tab    = "changelog"
-        self.current_filter = "installed"
-        self.current_sort   = SORT_OPTIONS[0]
+        self.current_filter = _start_page()
+        self.current_sort   = _setting("start_sort")
         # Pacman-repo package browsing/search-to-install support
         self.pacman_sync_full:     dict[str, dict]  = {}
         self._available_cache:     dict[str, Package] = {}
@@ -4107,6 +4237,12 @@ class PakchanWindow(Adw.ApplicationWindow):
         .badge-aur     {background:#F3E5F5;color:#6A1B9A;border-radius:4px;padding:1px 6px;font-size:11px;}
         .badge-flatpak {background:#E8F5E9;color:#2E7D32;border-radius:4px;padding:1px 6px;font-size:11px;}
         .badge-snap    {background:#FFF3E0;color:#E65100;border-radius:4px;padding:1px 6px;font-size:11px;}
+        .pk-dark .badge-pacman  {background:#12304D;color:#90CAF9;}
+        .pk-dark .badge-aur     {background:#34173F;color:#CE93D8;}
+        .pk-dark .badge-flatpak {background:#16341A;color:#A5D6A7;}
+        .pk-dark .badge-snap    {background:#47260A;color:#FFB74D;}
+        .not-installed-tag {font-size:10px;font-weight:600;border-radius:4px;padding:0 5px;
+                            border:1px solid alpha(currentColor,0.55);}
         .has-update    {color:@success_color;font-weight:bold;}
         .stale-warn    {color:@warning_color;font-style:italic;font-size:11px;}
         .mono          {font-family:monospace;font-size:12px;}
@@ -4145,19 +4281,20 @@ class PakchanWindow(Adw.ApplicationWindow):
         ref.connect("clicked", lambda _: self._load_packages())
         hb.pack_start(ref)
 
+        # Shown only when the window is narrow and the categories fold away
+        self.sidebar_toggle = Gtk.ToggleButton(icon_name="sidebar-show-symbolic")
+        self.sidebar_toggle.set_tooltip_text("Show categories")
+        self.sidebar_toggle.set_visible(False)
+        hb.pack_start(self.sidebar_toggle)
+
         # ── Hamburger menu ────────────────────────────────────────────────────
         menu_btn = Gtk.MenuButton()
         menu_btn.set_icon_name("open-menu-symbolic")
         menu_btn.set_tooltip_text("Menu")
 
         menu = Gio.Menu()
-        menu.append("Submit changelog source…", "win.submit_source")
-        menu.append("GitHub token…", "win.github_token")
-        theme_menu = Gio.Menu()
-        theme_menu.append("System", "win.theme::system")
-        theme_menu.append("Light", "win.theme::light")
-        theme_menu.append("Dark", "win.theme::dark")
-        menu.append_submenu("Theme", theme_menu)
+        menu.append("Preferences", "win.preferences")
+        menu.append("Submit changelog source", "win.submit_source")
         menu.append("About Pakchan", "win.about")
         menu_btn.set_menu_model(menu)
         hb.pack_end(menu_btn)
@@ -4171,14 +4308,17 @@ class PakchanWindow(Adw.ApplicationWindow):
         about_action.connect("activate", self._on_about)
         self.add_action(about_action)
 
-        token_action = Gio.SimpleAction.new("github_token", None)
-        token_action.connect("activate", self._on_github_token)
-        self.add_action(token_action)
-
-        theme_action = Gio.SimpleAction.new_stateful(
-            "theme", GLib.VariantType.new("s"), GLib.Variant.new_string(_load_theme()))
-        theme_action.connect("activate", self._on_theme)
-        self.add_action(theme_action)
+        app = self.get_application()
+        for name, handler, accels in (
+                ("preferences",  self._on_preferences,        ["<Control>comma"]),
+                ("shortcuts",    self._on_shortcuts,          ["<Control>question", "F1"]),
+                ("refresh",      lambda *_: self._load_packages(), ["<Control>r", "F5"]),
+                ("close_window", lambda *_: self.close(),     ["<Control>q"])):
+            act = Gio.SimpleAction.new(name, None)
+            act.connect("activate", handler)
+            self.add_action(act)
+            if app is not None:
+                app.set_accels_for_action(f"win.{name}", accels)
 
         root.append(hb)
 
@@ -4200,23 +4340,27 @@ class PakchanWindow(Adw.ApplicationWindow):
         self.paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         self.paned.set_vexpand(True)
 
-        left = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        sidebar = self._build_sidebar()
-        left.set_start_child(sidebar)
-        left.set_resize_start_child(False)   # categories stay compact by default; drag to resize
-        left.set_shrink_start_child(False)   # can't be dragged smaller than the sidebar's own min width
+        # Categories sit in a side panel that folds into an overlay when the window is narrow
+        left = Adw.OverlaySplitView()
+        left.set_sidebar(self._build_sidebar())
+        left.set_min_sidebar_width(162)
+        left.set_max_sidebar_width(200)
+        left.set_sidebar_width_fraction(0.2)
         pkg_panel = self._build_pkg_panel()
         pkg_panel.set_hexpand(True)
-        left.set_end_child(pkg_panel)
-        left.set_resize_end_child(True)      # extra window width goes to the package list, not the sidebar
-        left.set_shrink_end_child(False)
-        left.set_position(162)
-        # Minimum width so the outer divider can't squeeze this whole side to nothing
-        left.set_size_request(400, -1)
+        left.set_content(pkg_panel)
+        # Minimum width
+        left.set_size_request(300, -1)
+        self.split = left
+        left.bind_property("show-sidebar", self.sidebar_toggle, "active",
+                           GObject.BindingFlags.BIDIRECTIONAL | GObject.BindingFlags.SYNC_CREATE)
+        narrow = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 880sp"))
+        narrow.add_setter(left, "collapsed", True)
+        narrow.add_setter(self.sidebar_toggle, "visible", True)
+        self.add_breakpoint(narrow)
         self.paned.set_start_child(left)
         self.paned.set_resize_start_child(True)
-        # Disable Gtk.Paned's default allow-shrink so the divider can't hide a column
-        self.paned.set_shrink_start_child(False)
+        self.paned.set_shrink_start_child(True)
         self.paned.set_end_child(self._build_detail_panel())
         self.paned.set_resize_end_child(False)
         self.paned.set_shrink_end_child(False)
@@ -4237,6 +4381,7 @@ class PakchanWindow(Adw.ApplicationWindow):
 
         self.footer = Gtk.Label(label="Ready")
         self.footer.set_xalign(0)
+        self.footer.set_ellipsize(Pango.EllipsizeMode.END)   # long status text must not widen the window
         self.footer.add_css_class("dim-label")
         self.footer.set_margin_start(12)
         self.footer.set_margin_top(3)
@@ -4247,6 +4392,17 @@ class PakchanWindow(Adw.ApplicationWindow):
         key_controller = Gtk.EventControllerKey()
         key_controller.connect("key-pressed", self._on_window_key)
         self.add_controller(key_controller)
+
+        # The badge colours have a dark variant, switched by this class
+        style = Adw.StyleManager.get_default()
+        style.connect("notify::dark", self._on_dark_changed)
+        self._on_dark_changed(style, None)
+
+    def _on_dark_changed(self, style, _pspec):
+        if style.get_dark():
+            self.add_css_class("pk-dark")
+        else:
+            self.remove_css_class("pk-dark")
 
     def _on_window_key(self, controller, keyval, keycode, state):
         ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
@@ -4285,7 +4441,8 @@ class PakchanWindow(Adw.ApplicationWindow):
             self._filter_btns[key] = btn
             sb.append(btn)
 
-        self.current_filter = "installed"
+        for name, key in _SOURCE_SETTINGS.items():       # hide the sources that are turned off
+            self._filter_btns[name].set_visible(_setting(key))
         self._hl_sidebar()
         return sb
 
@@ -4342,6 +4499,7 @@ class PakchanWindow(Adw.ApplicationWindow):
 
         # Fix #16: sort dropdown
         self.sort_drop = Gtk.DropDown.new_from_strings(SORT_OPTIONS)
+        self.sort_drop.set_selected(SORT_OPTIONS.index(self.current_sort))
         self.sort_drop.set_tooltip_text("Sort order")
         self.sort_drop.connect("notify::selected", self._on_sort_changed)
         tb.append(self.sort_drop)
@@ -4365,7 +4523,8 @@ class PakchanWindow(Adw.ApplicationWindow):
 
         sc = Gtk.ScrolledWindow()
         sc.set_vexpand(True)
-        sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        # Sideways scrolling when a row is wider than the pane (never widens the window)
+        sc.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         # Virtualized list
         self.store = Gio.ListStore(item_type=PkgItem)
         factory = Gtk.SignalListItemFactory()
@@ -4399,12 +4558,13 @@ class PakchanWindow(Adw.ApplicationWindow):
         self.count_lbl.set_margin_start(10)
         self.count_lbl.set_margin_top(4); self.count_lbl.set_margin_bottom(6)
         self.count_lbl.set_xalign(0)
+        self.count_lbl.set_ellipsize(Pango.EllipsizeMode.END)   # long text must not widen the window
         box.append(self.count_lbl)
         return box
 
     def _build_detail_panel(self):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        box.set_size_request(360, -1)
+        box.set_size_request(320, -1)
 
         header_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         header_row.set_margin_start(12); header_row.set_margin_end(12)
@@ -4454,7 +4614,7 @@ class PakchanWindow(Adw.ApplicationWindow):
 
         sc = Gtk.ScrolledWindow()
         sc.set_vexpand(True)
-        sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sc.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         self.d_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         self.d_box.set_margin_start(12); self.d_box.set_margin_end(12)
         self.d_box.set_margin_top(8);    self.d_box.set_margin_bottom(8)
@@ -4499,9 +4659,12 @@ class PakchanWindow(Adw.ApplicationWindow):
         top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         name = Gtk.Label(); name.set_xalign(0); name.set_ellipsize(Pango.EllipsizeMode.END)
         name.add_css_class("heading"); top.append(name)
-        badge = Gtk.Label(); top.append(badge)
+        badge_box  = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=3)
+        badge_icon = Gtk.Image(); badge_icon.set_pixel_size(12); badge_box.append(badge_icon)
+        badge = Gtk.Label(); badge_box.append(badge)
+        top.append(badge_box)
         dep = Gtk.Label(label="dep"); dep.add_css_class("dep-tag"); top.append(dep)
-        not_inst = Gtk.Label(label="not installed"); not_inst.add_css_class("dep-tag")
+        not_inst = Gtk.Label(label="not installed"); not_inst.add_css_class("not-installed-tag")
         top.append(not_inst)
         nb.append(top)
 
@@ -4520,7 +4683,8 @@ class PakchanWindow(Adw.ApplicationWindow):
         hb.add_controller(right_click)
 
         hb.w = SimpleNamespace(cb=cb, action_icon=action_icon, app_icon=app_icon, name=name,
-                               badge=badge, dep=dep, not_inst=not_inst, ver=ver, arrow=arrow,
+                               badge=badge, badge_box=badge_box, badge_icon=badge_icon,
+                               dep=dep, not_inst=not_inst, ver=ver, arrow=arrow,
                                new_ver=new_ver, size=size)
         hb.pkg = None; hb.item = None; hb.binding = False; hb.badge_css = None
         list_item.set_child(hb)
@@ -4535,10 +4699,11 @@ class PakchanWindow(Adw.ApplicationWindow):
         try:
             w.name.set_label(pkg.display_name or pkg.name)
             if hb.badge_css:
-                w.badge.remove_css_class(hb.badge_css)
+                w.badge_box.remove_css_class(hb.badge_css)
             hb.badge_css = f"badge-{pkg.repo}"
-            w.badge.add_css_class(hb.badge_css)
+            w.badge_box.add_css_class(hb.badge_css)
             w.badge.set_label(pkg.repo)
+            w.badge_icon.set_from_icon_name(_REPO_ICONS.get(pkg.repo, "package-x-generic-symbolic"))
             w.dep.set_visible(bool(pkg.is_dep))
             w.not_inst.set_visible(not pkg.installed)
             self._set_row_icon(w.app_icon, pkg)
@@ -4895,7 +5060,9 @@ class PakchanWindow(Adw.ApplicationWindow):
             parts.append(f"{len(self.search_extra_results)} popular picks")
         if checked:
             parts.append(f"{checked} selected")
-        self.count_lbl.set_text(" · ".join(parts))
+        text = " · ".join(parts)
+        self.count_lbl.set_text(text)
+        self.count_lbl.set_tooltip_text(text)
 
     def _update_footer(self):
         pkgs  = self.all_packages
@@ -5027,6 +5194,8 @@ class PakchanWindow(Adw.ApplicationWindow):
 
     def _on_filter(self, btn, key):
         self.current_filter = key
+        if self.split.get_collapsed():
+            self.split.set_show_sidebar(False)   # fold the categories away after a pick
         self.search.set_text("")   # clear search — restores category browsing
         self._hl_sidebar()
         if key != "updates":
@@ -5291,6 +5460,14 @@ class PakchanWindow(Adw.ApplicationWindow):
         ref_btn.add_css_class("flat"); ref_btn.set_halign(Gtk.Align.START)
         ref_btn.connect("clicked", lambda _: self._force_refresh_cl(pkg))
         ref_row.append(ref_btn)
+        if _changelog_missing(pkg.changelog):
+            sub_btn = Gtk.Button(label="Submit changelog source")
+            sub_btn.add_css_class("suggested-action")
+            sub_btn.set_tooltip_text("Tell Pakchan where this package's changelog is")
+            sub_btn.connect("clicked", lambda _: self._open_uri(_submit_source_url(pkg)))
+            ref_row.append(sub_btn)
+        else:
+            ref_row.append(self._report_button(pkg))
         self.d_box.append(ref_row)
 
     def _render_changelog(self, pkg: Package):
@@ -5337,7 +5514,7 @@ class PakchanWindow(Adw.ApplicationWindow):
 
         # Source label: URL portion is a clickable link
         src_desc = pkg.changelog.get('source', '')
-        src_url = _resolve_source_url(pkg.changelog)
+        src_url = _resolve_source_url(pkg.changelog, pkg)
         src = Gtk.Label()
         src.set_xalign(0)
         src.set_wrap(True); src.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
@@ -5376,7 +5553,7 @@ class PakchanWindow(Adw.ApplicationWindow):
 
         # Stale warning
         if pkg.changelog.get("_stale"):
-            stale_lbl = Gtk.Label(label="⚠ Cached data may be outdated (>7 days)")
+            stale_lbl = Gtk.Label(label=f"⚠ Cached data may be outdated (>{_setting('cache_days')} days)")
             stale_lbl.add_css_class("stale-warn"); stale_lbl.set_xalign(0)
             self.d_box.append(stale_lbl)
 
@@ -5401,8 +5578,10 @@ class PakchanWindow(Adw.ApplicationWindow):
         self._append_refresh_row(pkg)
         self.d_box.append(Gtk.Separator())
 
-        for v in pkg.changelog.get("versions", []):
-            if not isinstance(v, dict): continue
+        shown = [v for v in pkg.changelog.get("versions", []) if isinstance(v, dict)]
+        if _setting("max_versions"):
+            shown = shown[:_setting("max_versions")]
+        for v in shown:
             vb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             vl = Gtk.Label()
             vl.set_markup(
@@ -5412,7 +5591,10 @@ class PakchanWindow(Adw.ApplicationWindow):
                 dl = Gtk.Label(label=str(v["date"]))
                 dl.add_css_class("dim-label"); vb.append(dl)
             self.d_box.append(vb)
-            for change in v.get("changes", []):
+            lines = v.get("changes", [])
+            if _setting("max_lines"):
+                lines = lines[:_setting("max_lines")]
+            for change in lines:
                 if not isinstance(change, str): continue
                 rb2 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
                 bul = Gtk.Label(label="•")
@@ -5470,7 +5652,7 @@ class PakchanWindow(Adw.ApplicationWindow):
             self._render_detail()
 
     def _render_files(self, pkg: Package):
-        """Walk the real Flatpak deploy directory; run pacman -Ql off the main thread."""
+        """Walk the real Flatpak deploy directory; run pacman -Ql (repo and AUR packages) off the main thread."""
         if not pkg.installed:
             note = Gtk.Label(label="Not installed — nothing to list yet.")
             note.add_css_class("dim-label"); note.set_halign(Gtk.Align.CENTER)
@@ -5478,7 +5660,7 @@ class PakchanWindow(Adw.ApplicationWindow):
             self.d_box.append(note)
             return
 
-        if pkg.repo == "pacman":
+        if pkg.repo in ("pacman", "aur"):
             sp = Gtk.Spinner(); sp.start()
             sp.set_size_request(24, 24); sp.set_halign(Gtk.Align.CENTER)
             self.d_box.append(sp)
@@ -5654,13 +5836,204 @@ class PakchanWindow(Adw.ApplicationWindow):
 
     # ── About & Menu ──────────────────────────────────────────────────────────
 
-    def _on_theme(self, action, param):
-        theme = param.get_string()
-        if theme not in _THEMES:
-            return
-        action.set_state(param)
-        _save_theme(theme)
-        _apply_theme(theme)
+    def _report_button(self, pkg) -> Gtk.MenuButton:
+        """ Report button"""
+        btn = Gtk.MenuButton()
+        btn.set_child(Adw.ButtonContent(icon_name="dialog-warning-symbolic", label="Report"))
+        btn.add_css_class("flat")
+        btn.set_tooltip_text("Report a wrong changelog")
+        pop = Gtk.Popover()
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        box.set_margin_top(6); box.set_margin_bottom(6); box.set_margin_start(6); box.set_margin_end(6)
+        note = Gtk.Label(label="Sending a report needs a GitHub account.")
+        note.add_css_class("dim-label")
+        box.append(note)
+        send = Gtk.Button(label="Report on GitHub")
+        send.add_css_class("flat")
+        send.connect("clicked", lambda _b: (pop.popdown(),
+                                            self._open_uri(_report_changelog_url(pkg, pkg.changelog))))
+        box.append(send)
+        see = Gtk.Button(label="See reported problems")
+        see.add_css_class("flat")
+        see.set_tooltip_text("Opens the list of issues; no login needed to read it")
+        see.connect("clicked", lambda _b: (pop.popdown(), self._open_uri(ISSUES_URL)))
+        box.append(see)
+        pop.set_child(box)
+        btn.set_popover(pop)
+        return btn
+
+    def _open_uri(self, uri: str):
+        try:
+            Gio.AppInfo.launch_default_for_uri(uri, None)
+        except Exception:
+            _dbg(f"could not open {uri}")
+            self._show_toast("Could not open the browser.")
+
+    # ── Preferences ─────────────────────────────────────────────────────────────────────
+
+    _START_PAGE_LABELS = [("All", "all"), ("Installed", "installed"), ("Pacman", "pacman"),
+                          ("AUR", "aur"), ("Flatpak", "flatpak"), ("Snap", "snap"),
+                          ("Updates", "updates")]
+
+    def _combo_pref(self, title: str, key: str, options: list, subtitle: str = "") -> Adw.ComboRow:
+        """A drop-down row bound to one setting; options are (label, value) pairs."""
+        options = list(options)
+        values = [v for _label, v in options]
+        current = _setting(key)
+        if current not in values:           # a value edited into the file by hand
+            options.append((str(current), current))
+            values.append(current)
+        row = Adw.ComboRow(title=title)
+        if subtitle:
+            row.set_subtitle(subtitle)
+        row.set_model(Gtk.StringList.new([label for label, _v in options]))
+        row.set_selected(values.index(current))
+        row.connect("notify::selected",
+                    lambda r, _p: self._on_pref_changed(key, values[r.get_selected()]))
+        return row
+
+    def _on_preferences(self, action, param, page: str = ""):
+        dlg = Adw.Window()
+        dlg.set_title("Preferences")
+        dlg.set_transient_for(self)
+        dlg.set_modal(True)
+        dlg.set_default_size(760, 620)
+        dlg.set_size_request(560, 360)
+        esc = Gtk.EventControllerKey()
+        esc.connect("key-pressed", lambda _c, keyval, *_a: dlg.close() or True if keyval == Gdk.KEY_Escape else False)
+        dlg.add_controller(esc)
+        stack = Adw.ViewStack()
+
+        def new_page(name: str, title: str, icon: str) -> Adw.PreferencesPage:
+            tab = Adw.PreferencesPage()
+            stack.add_titled_with_icon(tab, name, title, icon)
+            return tab
+
+        look = new_page("appearance", "Appearance", "preferences-desktop-appearance-symbolic")
+        theme = Adw.PreferencesGroup(title="Theme")
+        theme.add(self._combo_pref("Color scheme", "theme",
+                                   [("Follow system", "system"), ("Light", "light"), ("Dark", "dark")]))
+        look.add(theme)
+        start = Adw.PreferencesGroup(title="Startup", description="Used the next time Pakchan starts.")
+        start.add(self._combo_pref("Start page", "start_page", self._START_PAGE_LABELS))
+        start.add(self._combo_pref("Sort order", "start_sort", [(s, s) for s in SORT_OPTIONS]))
+        look.add(start)
+
+        sources = new_page("sources", "Sources", "system-software-install-symbolic")
+        group = Adw.PreferencesGroup(
+            title="Sources", description="Turn off what you don't use: it is hidden and not checked.")
+        for name, key in (("AUR", "source_aur"), ("Flatpak", "source_flatpak"), ("Snap", "source_snap")):
+            row = Adw.SwitchRow(title=name)
+            row.set_active(_setting(key))
+            row.connect("notify::active", self._on_source_toggled, key)
+            group.add(row)
+        sources.add(group)
+
+        helps = Adw.PreferencesGroup(
+            title="Help other users",
+            description=("Pakchan finds changelogs from a shared list of sources. If a package shows none, "
+                         "tell us where it can be found: after a quick check it is added for everyone."))
+        submit_row = Adw.ActionRow(title="Submit changelog source",
+                                   subtitle="Opens a short form in your browser.")
+        submit_btn = Gtk.Button(label="Open form")
+        submit_btn.set_valign(Gtk.Align.CENTER)
+        submit_btn.connect("clicked", lambda _b: self._on_submit_source(None, None))
+        submit_row.add_suffix(submit_btn)
+        helps.add(submit_row)
+        sources.add(helps)
+
+        notes = new_page("changelogs", "Changelogs", "document-open-recent-symbolic")
+        group = Adw.PreferencesGroup(title="Changelogs")
+        group.add(self._combo_pref("Keep results for", "cache_days",
+                                   [("1 day", 1), ("3 days", 3), ("7 days", 7), ("14 days", 14), ("30 days", 30)]))
+        hint = "Applies to lookups from now on; clear the cache to fetch again."
+        group.add(self._combo_pref("Versions per package", "max_versions",
+                                   [("Automatic", 0), ("3", 3), ("6", 6), ("10", 10), ("15", 15), ("20", 20)], hint))
+        group.add(self._combo_pref("Lines per version", "max_lines",
+                                   [("Automatic", 0), ("10", 10), ("20", 20), ("40", 40), ("60", 60), ("100", 100)], hint))
+        clear_row = Adw.ActionRow(title="Clear changelog cache",
+                                  subtitle="Forget every saved changelog so it is looked up again.")
+        clear_btn = Gtk.Button(label="Clear")
+        clear_btn.set_valign(Gtk.Align.CENTER)
+        clear_btn.connect("clicked", self._on_clear_cache)
+        clear_row.add_suffix(clear_btn)
+        group.add(clear_row)
+        notes.add(group)
+
+        github = new_page("github", "GitHub", "dialog-password-symbolic")
+        github.add(self._github_token_group())
+
+        keys = new_page("shortcuts", "Shortcuts", "input-keyboard-symbolic")
+        keys.add(self._shortcuts_group())
+
+        if page:
+            stack.set_visible_child_name(page)
+        switcher = Adw.ViewSwitcher()
+        switcher.set_policy(Adw.ViewSwitcherPolicy.WIDE)
+        switcher.set_stack(stack)
+        header = Adw.HeaderBar()
+        header.set_title_widget(switcher)
+        view = Adw.ToolbarView()
+        view.add_top_bar(header)
+        view.set_content(stack)
+        dlg.set_content(view)
+        dlg.present()
+        return dlg
+
+    def _shortcuts_group(self) -> Adw.PreferencesGroup:
+        group = Adw.PreferencesGroup(title="Keyboard shortcuts")
+        for title, _accel, label in self._SHORTCUTS:
+            row = Adw.ActionRow(title=title)
+            keys = Gtk.Label(label=label)
+            keys.add_css_class("dim-label")
+            keys.set_valign(Gtk.Align.CENTER)
+            row.add_suffix(keys)
+            group.add(row)
+        return group
+
+
+    def _on_pref_changed(self, key: str, value):
+        _set_setting(key, value)
+        if key == "theme":
+            _apply_theme(value)
+        elif key in ("max_versions", "max_lines") and self.selected_pkg is not None:
+            self._render_detail()
+
+    def _on_source_toggled(self, row, _pspec, key: str):
+        _set_setting(key, row.get_active())
+        for name, setting in _SOURCE_SETTINGS.items():
+            self._filter_btns[name].set_visible(_setting(setting))
+        off = _SOURCE_SETTINGS.get(self.current_filter)
+        if off and not _setting(off):
+            self.current_filter = "installed"
+            self._hl_sidebar()
+        self._load_packages()
+
+    def _on_clear_cache(self, btn):
+        count = _cl_cache_clear()
+        for p in list(self.all_packages) + list(self._available_cache.values()):
+            p.changelog = None
+        if self.selected_pkg is not None:
+            self.selected_pkg.changelog = None
+            if self.current_tab == "changelog":
+                self._render_detail()
+        btn.set_label("Cleared")
+        btn.set_sensitive(False)
+        self._show_toast(f"Changelog cache cleared ({count} saved results).")
+
+    # ── Keyboard shortcuts ─────────────────────────────────────────────────────
+
+    _SHORTCUTS = [("Search", "<Control>f", "Ctrl+F"),
+                  ("Clear the search, or leave it", "Escape", "Esc"),
+                  ("Move through the package list", "Up Down", "↑ ↓"),
+                  ("Refresh packages", "<Control>r F5", "Ctrl+R, F5"),
+                  ("Preferences", "<Control>comma", "Ctrl+,"),
+                  ("Keyboard shortcuts", "<Control>question F1", "Ctrl+?, F1"),
+                  ("Quit", "<Control>q", "Ctrl+Q")]
+
+    def _on_shortcuts(self, action, param):
+        self._on_preferences(action, param, "shortcuts")
+
 
     def _on_about(self, action, param):
         """Show About dialog."""
@@ -5696,48 +6069,51 @@ class PakchanWindow(Adw.ApplicationWindow):
         dlg.present(self)
 
     def _on_github_token(self, action, param):
-        """Menu: save, replace or remove the token used for GitHub lookups."""
+        self._on_preferences(action, param, "github")
+
+    def _github_token_group(self) -> Adw.PreferencesGroup:
+        """Save, replace or remove the token used for GitHub lookups."""
         have = _GH_TOKEN_FILE.exists()
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        group = Adw.PreferencesGroup(
+            title="GitHub token",
+            description=("Usually not necessary. The token increases GitHub's limit from 60 "
+                         "requests per hour to 5000. It needs no permissions."))
         steps = Gtk.Label(label=(
             "How to get one:\n"
             "1. Open the link below and log in to GitHub.\n"
             "2. Leave all the boxes unticked and click “Generate token”.\n"
-            "3. Copy the token (starts with ghp_) and paste it here."))
-        steps.set_xalign(0); steps.set_wrap(True)
-        box.append(steps)
+            "3. Copy the token (it starts with ghp_) and paste it here."))
+        steps.set_xalign(0); steps.set_wrap(True); steps.set_margin_bottom(6)
+        group.add(steps)
         link = Gtk.LinkButton.new_with_label(
             "https://github.com/settings/tokens/new?description=Pakchan",
             "Create a token on GitHub")
         link.set_halign(Gtk.Align.START)
-        box.append(link)
-        entry = Gtk.PasswordEntry()
-        entry.set_show_peek_icon(True)
-        entry.set_property("activates-default", True)
-        entry.set_property("placeholder-text", "A token is saved — paste a new one to replace it"
-                           if have else "Paste your token here")
-        box.append(entry)
+        group.add(link)
+        entry = Adw.PasswordEntryRow(
+            title="A token is saved — paste a new one to replace it" if have else "Paste your token here")
+        entry.set_show_apply_button(True)
+        entry.connect("apply", lambda row: self._on_github_token_response("save", row))
+        group.add(entry)
+        if have:
+            remove_row = Adw.ActionRow(title="Remove the saved token")
+            remove_btn = Gtk.Button(label="Remove")
+            remove_btn.add_css_class("destructive-action")
+            remove_btn.set_valign(Gtk.Align.CENTER)
+
+            def remove(_btn):
+                self._on_github_token_response("remove", entry)
+                remove_btn.set_sensitive(False)
+            remove_btn.connect("clicked", remove)
+            remove_row.add_suffix(remove_btn)
+            group.add(remove_row)
         note = Gtk.Label(label=f"Saved in {_GH_TOKEN_FILE}, readable only by you. "
                                "Pakchan sends it only to GitHub.")
-        note.set_xalign(0); note.set_wrap(True)
+        note.set_xalign(0); note.set_wrap(True); note.set_margin_top(6)
         note.add_css_class("dim-label")
-        box.append(note)
+        group.add(note)
+        return group
 
-        dlg = Adw.AlertDialog(
-            heading="GitHub token",
-            body=("Usually not necessary. The token increases GitHub's limit from 60 "
-                  "requests per hour to 5000. It needs no permissions."))
-        dlg.set_extra_child(box)
-        dlg.add_response("cancel", "Cancel")
-        if have:
-            dlg.add_response("remove", "Remove token")
-            dlg.set_response_appearance("remove", Adw.ResponseAppearance.DESTRUCTIVE)
-        dlg.add_response("save", "Save")
-        dlg.set_response_appearance("save", Adw.ResponseAppearance.SUGGESTED)
-        dlg.set_default_response("save")
-        dlg.set_close_response("cancel")
-        dlg.connect("response", lambda _d, response: self._on_github_token_response(response, entry))
-        dlg.present(self)
 
     def _on_github_token_response(self, response: str, entry):
         if response == "remove":
