@@ -36,8 +36,8 @@ Before you update anything, Pakchan shows you the real changelog for the *versio
 ### Everything on your desktop
 Pakchan brings all your packages from Pacman, AUR, Flatpak — installed and installable — into a single, searchable window, sorted the way you'd expect: by installed, by "needs an update," or just by source. Built with GTK4 and libadwaita, so it fits right in — proper icons for your apps, a clean sidebar, keyboard shortcuts.
 
-### No accounts, no API keys, no catch
-Every changelog source Pakchan uses is free and public. Nothing to sign up for, nothing to configure. And where a package doesn't have an obvious source, the community fills the gap — anyone can [submit a mapping](https://dodog.github.io/pakchan/web/) in a couple of clicks, and it becomes available to everyone.
+### Community maintained
+Where a package doesn't have an obvious source, the community fills the gap — anyone can [submit a mapping](https://dodog.github.io/pakchan/web/) in a couple of clicks, and it becomes available to everyone.
 
 
 ## 📦 Installation
