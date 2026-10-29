@@ -4116,11 +4116,8 @@ ISSUES_URL      = "https://github.com/dodog/pakchan/issues"
 
 
 def _submit_source_url(pkg) -> str:
-    """The web form, with the package name (and its homepage) filled in."""
-    query = {"package": pkg.name}
-    if pkg.url:
-        query["url"] = pkg.url
-    return SUBMIT_PAGE_URL + "?" + urllib.parse.urlencode(query)
+    """The web form with the package name filled in"""
+    return SUBMIT_PAGE_URL + "?" + urllib.parse.urlencode({"package": pkg.name})
 
 
 def _report_changelog_url(pkg, changelog: dict) -> str:
@@ -5921,7 +5918,7 @@ class PakchanWindow(Adw.ApplicationWindow):
 
         sources = new_page("sources", "Sources", "system-software-install-symbolic")
         group = Adw.PreferencesGroup(
-            title="Sources", description="Turn off what you don't use: it is hidden and not checked.")
+            title="Sources", description="Turn on/off package sources.")
         for name, key in (("AUR", "source_aur"), ("Flatpak", "source_flatpak"), ("Snap", "source_snap")):
             row = Adw.SwitchRow(title=name)
             row.set_active(_setting(key))
@@ -5931,8 +5928,8 @@ class PakchanWindow(Adw.ApplicationWindow):
 
         helps = Adw.PreferencesGroup(
             title="Help other users",
-            description=("Pakchan finds changelogs from a shared list of sources. If a package shows none, "
-                         "tell us where it can be found: after a quick check it is added for everyone."))
+            description=("Add a changelog source to the community database if Pakchan doesn't currently display it. "
+                         "This will help improve the shared database."))
         submit_row = Adw.ActionRow(title="Submit changelog source",
                                    subtitle="Opens a short form in your browser.")
         submit_btn = Gtk.Button(label="Open form")
@@ -6039,7 +6036,7 @@ class PakchanWindow(Adw.ApplicationWindow):
         """Show About dialog."""
         dlg = Adw.AboutDialog()
         dlg.set_application_name("Pakchan")
-        dlg.set_version("1.0.0")
+        dlg.set_version("2.0.0")
         dlg.set_comments(
             "A PAMAC-like package manager for Manjaro/Arch Linux "
             "with real changelogs for Pacman, AUR, Flatpak, and Snap.")
