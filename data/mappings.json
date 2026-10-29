@@ -181,6 +181,10 @@
       "host": "gitlab.gnome.org",
       "repo": "GNOME/gparted"
     },
+    "gedit": {
+      "host": "gitlab.gnome.org",
+      "repo": "World/gedit/gedit"
+    },    
     "gst-plugins-bad": {
       "host": "gitlab.freedesktop.org",
       "repo": "gstreamer/gst-plugins-bad"
