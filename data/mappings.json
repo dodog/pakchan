@@ -60,7 +60,6 @@
     "aria2": "aria2/aria2",
     "arrow": "apache/arrow",
     "audacity": "audacity/audacity",
-    "bazaar": "bazaar-org/bazaar",
     "bitwarden": "bitwarden/clients",
     "btop": "aristocratos/btop",
     "btrfs-progs": "kdave/btrfs-progs",
@@ -173,10 +172,14 @@
       "host": "gitlab.gnome.org",
       "repo": "GNOME/console"
     },
+    "bazaar": {
+      "host": "gitlab.gnome.org",
+      "repo": "World/bazaar"
+    },
     "gnome-control-center": {
       "host": "gitlab.gnome.org",
       "repo": "GNOME/gnome-control-center"
-    },
+    },    
     "gparted": {
       "host": "gitlab.gnome.org",
       "repo": "GNOME/gparted"
