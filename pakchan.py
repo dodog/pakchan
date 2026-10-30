@@ -6635,13 +6635,21 @@ class PakchanWindow(Adw.ApplicationWindow):
         # Mirror the terminal's last line onto the always-visible status footer
         self._vte_poll_id = GLib.timeout_add(400, self._poll_vte_status)
 
+    def _vte_text(self) -> str:
+        """Fix get_text()"""
+        term = self.vte_term
+        if hasattr(term, "get_text_format") and hasattr(Vte, "Format"):
+            return term.get_text_format(Vte.Format.TEXT) or ""
+        res = term.get_text()
+        return (res[0] if isinstance(res, tuple) else res) or ""
+
     def _poll_vte_status(self):
         try:
-            text = self.vte_term.get_text()[0]
+            text = self._vte_text()
+            last = next((ln.strip() for ln in reversed(text.split("\n")) if ln.strip()), None)
         except Exception:
             self._vte_poll_id = None
             return False
-        last = next((ln.strip() for ln in reversed(text.split("\n")) if ln.strip()), None)
         if last and "assword" not in last:
             snippet = last[:100]
             self.update_status_lbl.set_text(snippet)
@@ -6711,7 +6719,7 @@ class PakchanWindow(Adw.ApplicationWindow):
         text = ""
         if getattr(self, "_last_run_used_vte", False):
             try:
-                text = self.vte_term.get_text()[0] or ""
+                text = self._vte_text()
             except Exception:
                 text = ""
         else:
