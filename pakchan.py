@@ -4171,11 +4171,18 @@ class PkgItem(GObject.Object):
         self.pkg = pkg
 
 
-def _apply_theme(theme: str) -> None:
-    """Follow the system or force the light / dark colour scheme."""
+def _apply_theme(theme: str) -> bool:
+    """Follow the desktop (system) or force the light / dark colour scheme.
+    Returns False when the desktop kept a different scheme than the one asked for."""
     scheme = {"light": Adw.ColorScheme.FORCE_LIGHT,
               "dark":  Adw.ColorScheme.FORCE_DARK}.get(theme, Adw.ColorScheme.DEFAULT)
-    Adw.StyleManager.get_default().set_color_scheme(scheme)
+    style = Adw.StyleManager.get_default()
+    style.set_color_scheme(scheme)
+    wanted = {"light": False, "dark": True}.get(theme)
+    applied = wanted is None or style.get_dark() == wanted
+    _dbg(f"[theme] asked for {theme}: the app is now {'dark' if style.get_dark() else 'light'}"
+         f"{'' if applied else ' (the desktop overrides it)'}")
+    return applied
 
 
 
