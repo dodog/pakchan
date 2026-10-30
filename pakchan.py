@@ -1585,6 +1585,7 @@ _SOURCE_SETTINGS = {"aur": "source_aur", "flatpak": "source_flatpak", "snap": "s
 SETTING_DEFAULTS = {
     "theme": "system", "start_page": "installed", "start_sort": "Relevance",
     "cache_days": 7,
+    "win_width": 1180, "win_height": 760, "win_maximized": False,
     "max_versions": 0, "max_lines": 0,      # 0 = each source's own default
     "source_aur": True, "source_flatpak": True, "source_snap": True,
 }
@@ -1592,6 +1593,8 @@ _settings_data: Optional[dict] = None
 
 
 def _valid_setting(key: str, value) -> bool:
+    if key in ("win_width", "win_height"):
+        return isinstance(value, int) and not isinstance(value, bool) and 300 <= value <= 10000
     if key == "theme":      return value in _THEMES
     if key == "start_page": return value in _START_PAGES
     if key == "start_sort": return value in SORT_OPTIONS
@@ -4283,10 +4286,35 @@ class PakchanApp(Adw.Application):
 
 
 class PakchanWindow(Adw.ApplicationWindow):
+    def _on_start_maximized(self, *_a):
+        if self._start_guard and self.is_maximized():
+            self.unmaximize()
+
+    def _end_start_guard(self):
+        self._start_guard = False
+        return False
+    def _save_window_state(self, *_a):
+        """Remember window size"""
+        maximized = self.is_maximized()
+        if not maximized:      # while maximized the default size still holds the normal size
+            w, h = self.get_default_size()
+            if w > 0 and h > 0:
+                _set_setting("win_width", w)
+                _set_setting("win_height", h)
+        _set_setting("win_maximized", maximized)
+        return False           # let the window close
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.set_title("Pakchan")
-        self.set_default_size(1180, 760)
+        self.set_default_size(_setting("win_width"), _setting("win_height"))
+        if _setting("win_maximized"):
+            self.maximize()
+        self.connect("close-request", self._save_window_state)
+        # keep saved size 
+        self._start_guard = not _setting("win_maximized")
+        self.connect("notify::maximized", self._on_start_maximized)
+        self.connect("map", lambda *_a: GLib.timeout_add(1500, self._end_start_guard))
 
         self.all_packages:  list[Package] = []
         self.filtered:      list[Package] = []
