@@ -3127,7 +3127,7 @@ def _html_notes_to_changes(html_text: str) -> list[str]:
     return out[:_max_lines()]
 
 
-def _github_feed_releases(repo: str) -> Optional[dict]:
+def _github_feed_releases(repo: str, allow_pre: bool = False) -> Optional[dict]:
     """Releases from the repository's public Atom feed (no api limit) """
     body = http_get(f"https://github.com/{repo}/releases.atom", timeout=12)
     if not body or "<!DOCTYPE" in body or "<!ENTITY" in body:
@@ -3148,39 +3148,70 @@ def _github_feed_releases(repo: str) -> Optional[dict]:
         versions.append({"version": ver,
                          "date": entry.findtext("a:updated", default="", namespaces=ns)[:10],
                          "changes": changes or [f"Release {ver}"]})
-        if len(versions) >= _max_versions():
-            break
+    raw_count = len(versions)
+    if not allow_pre:
+        versions = [v for v in versions if not _is_prerelease_version(v["version"])]
+    versions = versions[:_max_versions()]
     if not versions:
         return None
-    _dbg(f"[github] {repo}: releases feed read ({len(versions)} entries, no API request)")
-    return {"versions": versions, "source": f"GitHub Releases — {repo}"}
+    _dbg(f"[github] {repo}: releases feed read ({len(versions)} of {raw_count} entries, no API request)")
+    # the feed holds at most ~10 releases: if it was full, older final releases may be missing
+    return {"versions": versions, "source": f"GitHub Releases — {repo}",
+            "_feed_full": raw_count >= 10}
 
 
 def _github_releases(repo: str, _pkg_name: str) -> Optional[dict]:
     """Releases of a GitHub repository. API is fallback if the feed can't be read."""
-    r = _github_feed_releases(repo)
-    if r:
+    feed = _github_feed_releases(repo)
+    if feed:
+        full = feed.pop("_feed_full", False)
+        if not full or len(feed["versions"]) >= _max_versions():
+            return feed
+        _dbg(f"[github] {repo}: feed has only {len(feed['versions'])} final release(s) — asking the API for more")
+    else:
+        _dbg(f"[github] {repo}: no usable releases feed — trying the API")
+    r = _github_api_releases(repo)
+    if r and (not feed or len(r["versions"]) > len(feed["versions"])):
         return r
-    _dbg(f"[github] {repo}: no usable releases feed — trying the API")
-    data = http_get_json(f"https://api.github.com/repos/{repo}/releases?per_page=8")
+    if feed:
+        return feed
+
+    # Only pre-releases exist (or API unavailable): show them rather than nothing
+    r = _github_feed_releases(repo, allow_pre=True)
+    if r:
+        r.pop("_feed_full", None)
+        return r
+
+    # Last resort: bare tags with no content
+    data = http_get_json(f"https://api.github.com/repos/{repo}/tags?per_page=30")
+    if data and isinstance(data, list) and data:
+        names = [_extract_version_from_tag(t.get("name") or "") for t in data]
+        names = [n for n in names if not _is_prerelease_version(n)] or names
+        return {"versions": [{"version": n, "date": "", "changes": ["See GitHub for release notes."]}
+                             for n in names[:_max_versions()]],
+                "source": f"GitHub tags — {repo}"}
+    return None
+
+
+def _github_api_releases(repo: str) -> Optional[dict]:
+    """Final (non-pre, non-draft) releases from the API, looking 30 releases deep."""
+    data = http_get_json(f"https://api.github.com/repos/{repo}/releases?per_page=30")
     if data and isinstance(data, list) and data:
         versions = []
-        for rel in data[:_max_versions()]:
+        for rel in data:
+            if not isinstance(rel, dict) or rel.get("draft") or rel.get("prerelease"):
+                continue
             ver  = _extract_version_from_tag(rel.get("tag_name") or "")
+            if _is_prerelease_version(ver):
+                continue
             date = (rel.get("published_at") or "")[:10]
             body = rel.get("body") or ""
             versions.append({"version": ver, "date": date,
                              "changes": _parse_md_changelog(body)[:_max_lines()] or [f"Release {ver}"]})
+            if len(versions) >= _max_versions():
+                break
         if versions:
             return {"versions": versions, "source": f"GitHub Releases — {repo}"}
-
-    # Last resort: bare tags with no content
-    data = http_get_json(f"https://api.github.com/repos/{repo}/tags?per_page=8")
-    if data and isinstance(data, list) and data:
-        return {"versions": [{"version": _extract_version_from_tag(t.get("name") or ""),
-                              "date": "", "changes": ["See GitHub for release notes."]}
-                             for t in data[:_max_versions()]],
-                "source": f"GitHub tags — {repo}"}
     return None
 
 
@@ -3206,9 +3237,31 @@ def _is_meaningful_changelog(changes: list[str]) -> bool:
     return False
 
 
+_PRERELEASE_RE = re.compile(
+    r'(?<![a-z])(alpha|beta|rc|pre|preview|dev|nightly|snapshot|canary|unstable)(?![a-z])',
+    re.IGNORECASE)
+
+
+def _is_prerelease_version(ver: str) -> bool:
+    """True for alpha/beta/rc/dev style versions"""
+    return bool(_PRERELEASE_RE.search(ver or ""))
+
+
+def _drop_prereleases(versions: list) -> list:
+    """Keep only final versions; if there are none, keep everything."""
+    stable = [v for v in versions if not _is_prerelease_version(v.get("version", ""))]
+    return stable or versions
+
+
+_NAME_PREFIX_RE = re.compile(r'^[A-Za-z][A-Za-z0-9._ -]*?[-_ ]v?(\d+(?:\.\d+)+.*)$')
+
+
 def _extract_version_from_tag(tag_name: str) -> str:
     """Normalise a tag name into a readable, comparison-friendly version."""
     t = (tag_name or "").strip()
+    m = _NAME_PREFIX_RE.match(t)
+    if m:
+        t = m.group(1)
     t = t.removeprefix("v").removeprefix("V")
 
     for _ in range(3):
@@ -3431,6 +3484,7 @@ def _forge_releases(host: str, repo: str, _pkg_name: str,
             changes = _parse_md_changelog(desc)
             versions.append({"version": ver, "date": date,
                              "changes": changes[:_max_lines()] or [desc[:120].replace("\n"," ")] or [f"Release {ver}"]})
+        versions = _drop_prereleases(versions)
         _sort_versions_newest_first(versions)
         versions = versions[:_max_versions()]
         if any(_is_meaningful_changelog(v.get("changes", [])) for v in versions):
@@ -3461,6 +3515,7 @@ def _forge_releases(host: str, repo: str, _pkg_name: str,
                     "date": str(_dig(tag, *spec["tag_date"]) or "")[:10],
                     "changes": changes[:8],
                 })
+        candidates = _drop_prereleases(candidates)
         _sort_versions_newest_first(candidates)
         candidates = candidates[:_max_versions()]
         if any(_is_meaningful_changelog(v.get("changes", [])) for v in candidates):
