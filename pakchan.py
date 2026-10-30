@@ -3960,6 +3960,27 @@ def fetch_changelog_flatpak(pkg: Package) -> dict:
     return {"versions": versions, "source": "Flathub AppStream metadata"}
 
 
+def _snap_store_links(name: str) -> dict:
+    """Source-code and website links from the snap's Snap Store page"""
+    found: dict[str, list] = {"source": [], "website": []}
+    body = http_get(f"https://snapcraft.io/{urllib.parse.quote(name)}", timeout=12)
+    if not body:
+        _dbg("[snap] store page: could not be fetched")
+        return found
+    for key, title in (("source", "Source code"), ("website", "Websites?")):
+        for m in re.finditer(
+                rf'<h[2-5][^>]*>\s*{title}\s*</h[2-5]>(.*?)(?=<h[2-5]\b|<hr\b|\Z)',
+                body, re.DOTALL | re.IGNORECASE):
+            for href in re.findall(r'href="(https?://[^"]+)"', m.group(1)):
+                href = html.unescape(href)
+                host = (urllib.parse.urlsplit(href).hostname or "").lower()
+                if host.endswith("snapcraft.io") or href in found[key]:
+                    continue
+                found[key].append(href)
+    _dbg(f"[snap] store page links: source={found['source']} website={found['website']}")
+    return found
+
+
 def fetch_changelog_snap(pkg: Package) -> dict:
     # 1. Always check mappings first
     r = _check_mappings_first(pkg)
@@ -3998,15 +4019,22 @@ def fetch_changelog_snap(pkg: Package) -> dict:
             if len(versions) >= 4: break
     store_url = store_url or f"https://snapcraft.io/{pkg.name}"
 
-    # Candidate upstream URL
+    # Candidate upstream URLs: source code first, then websites
     links = {}
     if data and isinstance(data, dict):
         links = snap_info.get("links") or data.get("links") or {}
+    store_links = _snap_store_links(pkg.name)
     candidates = []
+    for u in store_links["source"]:
+        if u not in candidates:
+            candidates.append(u)
     for key in ("source-code", "issues", "website"):
         for u in (links.get(key) or []):
             if u and u not in candidates:
                 candidates.append(u)
+    for u in store_links["website"]:
+        if u not in candidates:
+            candidates.append(u)
     if not pkg.url:
         # Fall back to `snap info`'s local website line if the API gave nothing
         out, _, rc = run(["snap", "info", pkg.name])
@@ -4019,7 +4047,7 @@ def fetch_changelog_snap(pkg: Package) -> dict:
         candidates.append(pkg.url)
 
     best_link_only = None
-    for url in candidates:
+    for url in candidates[:6]:
         r = _upstream_changelog(url, pkg.name, pkg.version)
         if r and r.get("versions"):
             if not r.get("_link_only"):
@@ -4032,6 +4060,8 @@ def fetch_changelog_snap(pkg: Package) -> dict:
                     else (candidates[0] if candidates else store_url))
     if not versions:
         versions = [{"version": pkg.version, "date": "", "changes": []}]
+    # One entry only
+    versions = versions[:1]
     for v in versions:
         v["changes"] = ["Snap Store doesn't provide release notes for this package."]
     return {"versions": versions, "source": "Snap Store",
@@ -5598,6 +5628,8 @@ class PakchanWindow(Adw.ApplicationWindow):
 
         # adds a clickable link when automatic changelog detection found nothing
         manual_url = pkg.changelog.get("_manual_check_url")
+        if manual_url and src_url and manual_url.rstrip("/") == src_url.rstrip("/"):
+            manual_url = None       # the Source line already shows this link
         if manual_url:
             escaped_url = GLib.markup_escape_text(manual_url)
             manual_lbl = Gtk.Label()
