@@ -1235,6 +1235,14 @@ def _flatpak_search(q: str) -> list[dict]:
     return results
 
 
+def _flatpak_search_cached(q: str) -> Optional[list]:
+    """The remembered result of a Flatpak search, or None if there is none (or it is too old)."""
+    hit = _fp_search_cache.get(q)
+    if hit and time.monotonic() - hit[0] < _FP_CACHE_TTL:
+        return hit[1]
+    return None
+
+
 _PKGBUILD_FILE_CAP = 200_000   # bytes read from any one file of an AUR package
 
 
@@ -4690,6 +4698,8 @@ class PakchanWindow(Adw.ApplicationWindow):
         self._pkgbuild_inflight: set[str]         = set()
         self._preview_busy = False
         self._searched = ""          # the query the list currently shows
+        self._fp_searching: set[str] = set()       # Flatpak searches running in the background
+        self._fp_done: dict[str, float] = {}       # when a Flatpak search last finished, per query
 
         self._build_ui()
         # Network state
@@ -5324,10 +5334,21 @@ class PakchanWindow(Adw.ApplicationWindow):
         if q:
             pool = [p for p in self.all_packages
                     if q in p.name.lower() or q in p.description.lower()]
-            self.search_extra_results = (self._find_installable_matches(q) +
-                                          self._find_installable_flatpak_matches(q) +
-                                          self._find_installable_aur_matches(q))
+            timing: dict[str, float] = {}
+
+            def timed(label, fn):
+                t0 = time.perf_counter()
+                found = fn(q)
+                timing[label] = time.perf_counter() - t0
+                return found
+
+            self.search_extra_results = (timed("pacman", self._find_installable_matches) +
+                                          timed("flatpak", self._find_installable_flatpak_matches) +
+                                          timed("aur", self._find_installable_aur_matches))
             pool = pool + self.search_extra_results
+            if sum(timing.values()) > 0.3:
+                print(f"[search] '{q}' was slow: " +
+                      ", ".join(f"{k} {v * 1000:.0f} ms" for k, v in timing.items()), file=sys.stderr)
         elif flt == "updates":
             pool = [p for p in self.all_packages if p.has_update]
             self.search_extra_results = []
@@ -5430,10 +5451,13 @@ class PakchanWindow(Adw.ApplicationWindow):
                 for _, _, name, info in scored[:limit]]
 
     def _find_installable_flatpak_matches(self, q: str, limit: int = 60) -> list:
-        if not q:
+        if not q or not _setting("source_flatpak"):
+            return []
+        raw = _flatpak_search_cached(q)
+        if raw is None:
+            self._start_flatpak_search(q)
             return []
         installed_ids = {p.name for p in self.all_packages if p.repo == "flatpak"}
-        raw = _flatpak_search(q)
         scored = []
         for r in raw:
             app_id = r["app_id"]
@@ -5454,8 +5478,26 @@ class PakchanWindow(Adw.ApplicationWindow):
                     icon_name=app_id, display_name=r.get("name", ""))
                 for _, _, app_id, r in scored[:limit]]
 
+    def _start_flatpak_search(self, q: str):
+        if q in self._fp_searching or not cmd_exists("flatpak"):
+            return
+        if time.monotonic() - self._fp_done.get(q, -1e9) < _FP_CACHE_TTL:
+            return                     # it already ran and found nothing usable (failed or timed out)
+        self._fp_searching.add(q)
+
+        def work():
+            _flatpak_search(q)
+            GLib.idle_add(self._flatpak_search_done, q)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _flatpak_search_done(self, q: str):
+        self._fp_searching.discard(q)
+        self._fp_done[q] = time.monotonic()
+        if self.search.get_text().lower().strip() == q:     # still the search on screen
+            self._populate_list()
+
     def _find_installable_aur_matches(self, q: str, limit: int = 150) -> list:
-        if not q:
+        if not q or not _setting("source_aur"):
             return []
         installed_names = {p.name for p in self.all_packages}
         found = _aur_search(q, installed_names, limit)
@@ -5530,6 +5572,8 @@ class PakchanWindow(Adw.ApplicationWindow):
             parts.append("search results")
         elif flt == "all" and self.search_extra_results:
             parts.append(f"{len(self.search_extra_results)} popular picks")
+        if q and q in self._fp_searching:
+            parts.append("searching Flatpak…")
         if checked:
             parts.append(f"{checked} selected")
         text = " · ".join(parts)
