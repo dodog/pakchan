@@ -111,7 +111,7 @@ app.run(None)
 sys.exit(1 if app.cancelled else 0)
 '''
 
-import gzip, html, json, os, re, shlex, shutil, sys, tarfile, tempfile, threading, time
+import gzip, html, json, os, re, shlex, shutil, sys, tarfile, tempfile, threading, time, warnings
 
 # Strip ANSI codes from raw pty output for the no-Vte fallback view
 _ANSI_ESCAPE_RE = re.compile(
@@ -1588,6 +1588,7 @@ SETTING_DEFAULTS = {
     "win_width": 1180, "win_height": 760, "win_maximized": False,
     "max_versions": 0, "max_lines": 0,      # 0 = each source's own default
     "source_aur": True, "source_flatpak": True, "source_snap": True,
+    "background": False,                    # keep running in the tray when the window is closed
 }
 _settings_data: Optional[dict] = None
 
@@ -1656,6 +1657,263 @@ def _max_lines(default: int = 10) -> int:
 
 def _cl_max_age() -> float:
     return _setting("cache_days") * 86400
+
+# ─── Autostart and tray icon ──────────────────────────────────────────────────
+
+APP_ID = "sk.mayday.pakchan"
+
+
+def _autostart_file() -> Path:
+    return (Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+            / "autostart" / f"{APP_ID}.desktop")
+
+
+def _set_autostart(enabled: bool) -> bool:
+    """Create or remove the start-at-login entry; False if that was not possible."""
+    path = _autostart_file()
+    try:
+        if not enabled:
+            path.unlink(missing_ok=True)
+            return True
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "[Desktop Entry]\nType=Application\nName=Pakchan\n"
+            "Comment=Package manager with real changelogs\n"
+            "Exec=pakchan --background\n"
+            f"Icon={APP_ID}\nTerminal=false\nX-GNOME-Autostart-enabled=true\n", encoding="utf-8")
+        return True
+    except OSError as e:
+        _dbg(f"[autostart] {e}")
+        return False
+
+
+def _tray_host_available() -> bool:
+    """Tray icon host (GNOME AppIndicator, KDE)"""
+    try:
+        conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        reply = conn.call_sync(
+            "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "NameHasOwner",
+            GLib.Variant("(s)", ("org.kde.StatusNotifierWatcher",)), GLib.VariantType("(b)"),
+            Gio.DBusCallFlags.NONE, 1000, None)
+        return bool(reply.unpack()[0])
+    except GLib.Error:
+        return False
+
+
+_SNI_XML = """<node><interface name="org.kde.StatusNotifierItem">
+  <property name="Category" type="s" access="read"/>
+  <property name="Id" type="s" access="read"/>
+  <property name="Title" type="s" access="read"/>
+  <property name="Status" type="s" access="read"/>
+  <property name="WindowId" type="u" access="read"/>
+  <property name="IconName" type="s" access="read"/>
+  <property name="IconPixmap" type="a(iiay)" access="read"/>
+  <property name="OverlayIconName" type="s" access="read"/>
+  <property name="OverlayIconPixmap" type="a(iiay)" access="read"/>
+  <property name="AttentionIconName" type="s" access="read"/>
+  <property name="AttentionIconPixmap" type="a(iiay)" access="read"/>
+  <property name="AttentionMovieName" type="s" access="read"/>
+  <property name="ToolTip" type="(sa(iiay)ss)" access="read"/>
+  <property name="ItemIsMenu" type="b" access="read"/>
+  <property name="Menu" type="o" access="read"/>
+  <method name="ContextMenu"><arg type="i" direction="in"/><arg type="i" direction="in"/></method>
+  <method name="Activate"><arg type="i" direction="in"/><arg type="i" direction="in"/></method>
+  <method name="SecondaryActivate"><arg type="i" direction="in"/><arg type="i" direction="in"/></method>
+  <method name="Scroll"><arg type="i" direction="in"/><arg type="s" direction="in"/></method>
+  <signal name="NewTitle"/><signal name="NewIcon"/><signal name="NewAttentionIcon"/>
+  <signal name="NewOverlayIcon"/><signal name="NewToolTip"/>
+  <signal name="NewStatus"><arg type="s"/></signal>
+</interface></node>"""
+
+_DBUSMENU_XML = """<node><interface name="com.canonical.dbusmenu">
+  <property name="Version" type="u" access="read"/>
+  <property name="TextDirection" type="s" access="read"/>
+  <property name="Status" type="s" access="read"/>
+  <property name="IconThemePath" type="as" access="read"/>
+  <method name="GetLayout">
+    <arg type="i" name="parentId" direction="in"/><arg type="i" name="recursionDepth" direction="in"/>
+    <arg type="as" name="propertyNames" direction="in"/>
+    <arg type="u" name="revision" direction="out"/><arg type="(ia{sv}av)" name="layout" direction="out"/>
+  </method>
+  <method name="GetGroupProperties">
+    <arg type="ai" name="ids" direction="in"/><arg type="as" name="propertyNames" direction="in"/>
+    <arg type="a(ia{sv})" name="properties" direction="out"/>
+  </method>
+  <method name="GetProperty">
+    <arg type="i" name="id" direction="in"/><arg type="s" name="name" direction="in"/>
+    <arg type="v" name="value" direction="out"/>
+  </method>
+  <method name="Event">
+    <arg type="i" name="id" direction="in"/><arg type="s" name="eventId" direction="in"/>
+    <arg type="v" name="data" direction="in"/><arg type="u" name="timestamp" direction="in"/>
+  </method>
+  <method name="EventGroup">
+    <arg type="a(isvu)" name="events" direction="in"/><arg type="ai" name="idErrors" direction="out"/>
+  </method>
+  <method name="AboutToShow">
+    <arg type="i" name="id" direction="in"/><arg type="b" name="needUpdate" direction="out"/>
+  </method>
+  <method name="AboutToShowGroup">
+    <arg type="ai" name="ids" direction="in"/>
+    <arg type="ai" name="updatesNeeded" direction="out"/><arg type="ai" name="idErrors" direction="out"/>
+  </method>
+  <signal name="ItemsPropertiesUpdated">
+    <arg type="a(ia{sv})" name="updatedProps"/><arg type="a(ias)" name="removedProps"/>
+  </signal>
+  <signal name="LayoutUpdated"><arg type="u" name="revision"/><arg type="i" name="parent"/></signal>
+  <signal name="ItemActivationRequested"><arg type="i" name="id"/><arg type="u" name="timestamp"/></signal>
+</interface></node>"""
+
+
+class _TrayIcon:
+    """Tray icon over the StatusNotifierItem protocol, with a small dbusmenu menu."""
+    ITEM_PATH, MENU_PATH = "/StatusNotifierItem", "/MenuBar"
+    WATCHER = "org.kde.StatusNotifierWatcher"
+    ENTRIES = ((1, "Open Pakchan", "open"), (2, "Check for updates", "updates"),
+               (3, None, None), (4, "Quit", "quit"))          # id, label, action (None = separator)
+    _ITEM_PROPS = {
+        "Category": ("s", "ApplicationStatus"), "Id": ("s", APP_ID), "Title": ("s", "Pakchan"),
+        "Status": ("s", "Active"), "WindowId": ("u", 0), "IconName": ("s", APP_ID),
+        "IconPixmap": ("a(iiay)", []), "OverlayIconName": ("s", ""), "OverlayIconPixmap": ("a(iiay)", []),
+        "AttentionIconName": ("s", ""), "AttentionIconPixmap": ("a(iiay)", []),
+        "AttentionMovieName": ("s", ""), "ToolTip": ("(sa(iiay)ss)", (APP_ID, [], "Pakchan", "")),
+        "ItemIsMenu": ("b", False), "Menu": ("o", MENU_PATH)}
+    _MENU_PROPS = {"Version": ("u", 3), "TextDirection": ("s", "ltr"), "Status": ("s", "normal"),
+                   "IconThemePath": ("as", [])}
+
+    def __init__(self, on_action, on_host):
+        self._on_action, self._on_host = on_action, on_host
+        self._conn, self._ids, self._owner, self._watch = None, [], 0, 0
+        self._acquired = self._host = self.registered = False
+        self._name = f"org.kde.StatusNotifierItem-{os.getpid()}-1"
+
+    # -- life cycle --
+    def start(self) -> bool:
+        try:
+            self._conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            item = Gio.DBusNodeInfo.new_for_xml(_SNI_XML).interfaces[0]
+            menu = Gio.DBusNodeInfo.new_for_xml(_DBUSMENU_XML).interfaces[0]
+            self._ids = []
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                self._ids = [
+                    self._conn.register_object(self.ITEM_PATH, item, self._item_call, self._item_get, None),
+                    self._conn.register_object(self.MENU_PATH, menu, self._menu_call, self._menu_get, None)]
+            self._owner = Gio.bus_own_name_on_connection(
+                self._conn, self._name, Gio.BusNameOwnerFlags.NONE, self._name_acquired, None)
+            self._watch = Gio.bus_watch_name_on_connection(
+                self._conn, self.WATCHER, Gio.BusNameWatcherFlags.NONE, self._appeared, self._vanished)
+            return True
+        except GLib.Error as e:
+            _dbg(f"[tray] could not start: {e}")
+            self.stop()
+            return False
+
+    def stop(self):
+        conn, self._conn = self._conn, None
+        if conn is not None:
+            for obj_id in self._ids:
+                conn.unregister_object(obj_id)
+        if self._owner:
+            Gio.bus_unown_name(self._owner)
+        if self._watch:
+            Gio.bus_unwatch_name(self._watch)
+        self._ids, self._owner, self._watch = [], 0, 0
+        self._acquired = self._host = self.registered = False
+
+    def _name_acquired(self, _conn, _name):
+        self._acquired = True
+        self._register()
+
+    def _appeared(self, _conn, _name, _owner):
+        self._host = True
+        self._register()
+
+    def _vanished(self, _conn, _name):
+        self._host = False
+        if self.registered:
+            self.registered = False
+            self._on_host(False)
+
+    def _register(self):
+        if self._conn is None or not (self._acquired and self._host) or self.registered:
+            return
+        self._conn.call(self.WATCHER, "/StatusNotifierWatcher", self.WATCHER,
+                        "RegisterStatusNotifierItem", GLib.Variant("(s)", (self._name,)), None,
+                        Gio.DBusCallFlags.NONE, 5000, None, self._register_done)
+
+    def _register_done(self, conn, result):
+        try:
+            conn.call_finish(result)
+        except GLib.Error as e:
+            _dbg(f"[tray] registering failed: {e}")
+            return
+        if self._conn is not None and self._host and not self.registered:
+            self.registered = True
+            self._on_host(True)
+
+    # -- org.kde.StatusNotifierItem --
+    def _item_get(self, _conn, _sender, _path, _iface, prop):
+        kind, value = self._ITEM_PROPS[prop]
+        return GLib.Variant(kind, value)
+
+    def _item_call(self, _conn, _sender, _path, _iface, method, _params, invocation):
+        if method in ("Activate", "SecondaryActivate"):
+            self._on_action("open")
+        invocation.return_value(None)       # ContextMenu and Scroll: the host shows the menu itself
+
+    # -- com.canonical.dbusmenu --
+    def _menu_get(self, _conn, _sender, _path, _iface, prop):
+        kind, value = self._MENU_PROPS[prop]
+        return GLib.Variant(kind, value)
+
+    def _props(self, entry_id: int) -> dict:
+        label = next((e[1] for e in self.ENTRIES if e[0] == entry_id), None)
+        if entry_id == 0:
+            return {"children-display": GLib.Variant("s", "submenu")}
+        if label is None:
+            return {"type": GLib.Variant("s", "separator")}
+        return {"label": GLib.Variant("s", label), "enabled": GLib.Variant("b", True),
+                "visible": GLib.Variant("b", True)}
+
+    def _layout(self):
+        children = [GLib.Variant("(ia{sv}av)", (e[0], self._props(e[0]), [])) for e in self.ENTRIES]
+        return (0, self._props(0), children)
+
+    def _clicked(self, entry_id: int, event: str):
+        action = next((e[2] for e in self.ENTRIES if e[0] == entry_id), None)
+        if event == "clicked" and action:
+            self._on_action(action)
+
+    def _menu_call(self, _conn, _sender, _path, _iface, method, params, invocation):
+        try:
+            args = params.unpack()
+            if method == "GetLayout":
+                reply = GLib.Variant("(u(ia{sv}av))", (1, self._layout()))
+            elif method == "GetGroupProperties":
+                ids = args[0] or [e[0] for e in self.ENTRIES]
+                reply = GLib.Variant("(a(ia{sv}))", ([(i, self._props(i)) for i in ids],))
+            elif method == "GetProperty":
+                reply = GLib.Variant("(v)", (self._props(args[0]).get(args[1], GLib.Variant("s", "")),))
+            elif method == "Event":
+                self._clicked(args[0], args[1])
+                reply = None
+            elif method == "EventGroup":
+                for entry_id, event, _data, _stamp in args[0]:
+                    self._clicked(entry_id, event)
+                reply = GLib.Variant("(ai)", ([],))
+            elif method == "AboutToShow":
+                reply = GLib.Variant("(b)", (False,))
+            elif method == "AboutToShowGroup":
+                reply = GLib.Variant("(aiai)", ([], []))
+            else:
+                invocation.return_dbus_error("org.freedesktop.DBus.Error.UnknownMethod", method)
+                return
+            invocation.return_value(reply)
+        except Exception as e:      # noqa: BLE001  (answer the caller instead of leaving it waiting)
+            _dbg(f"[tray] {method}: {e}")
+            invocation.return_dbus_error("org.freedesktop.DBus.Error.Failed", str(e))
+
 
 # AUR's full metadata dump, cached locally
 AUR_META_URL       = "https://aur.archlinux.org/packages-meta-ext-v1.json.gz"
@@ -4277,12 +4535,77 @@ def _apply_theme(theme: str) -> bool:
 
 class PakchanApp(Adw.Application):
     def __init__(self):
-        super().__init__(application_id="sk.mayday.pakchan")
+        super().__init__(application_id=APP_ID)
+        self.win: Optional["PakchanWindow"] = None
+        self.tray: Optional[_TrayIcon] = None
+        self._held = False             # kept alive by the tray while the window is hidden
+        self._hidden_start = False
+        self.add_main_option("background", 0, GLib.OptionFlags.NONE, GLib.OptionArg.NONE,
+                             "Start hidden in the tray (needs the tray setting)", None)
+        self.connect("handle-local-options", self._on_local_options)
         self.connect("activate", self.on_activate)
 
+    def _on_local_options(self, _app, options):
+        self._hidden_start = options.contains("background")
+        return -1                      # carry on starting
+
     def on_activate(self, app):
+        if self.win is not None:       # second launch or tray click: show the same window
+            self.win.present()
+            return
         _apply_theme(_setting("theme"))
-        PakchanWindow(application=app).present()
+        self.win = PakchanWindow(application=app)
+        self.win.connect("destroy", lambda *_: setattr(self, "win", None))
+        hidden = self._hidden_start and _setting("background")
+        self._hidden_start = False
+        if _setting("background"):
+            self.set_tray(True)
+        if hidden:
+            GLib.timeout_add_seconds(15, self._show_if_no_tray)   # without a tray there is no way back in
+        else:
+            self.win.present()
+
+    def set_tray(self, on: bool):
+        if on and self.tray is None:
+            self.tray = _TrayIcon(self._tray_action, self._tray_host_changed)
+            if not self.tray.start():
+                self.tray = None
+        elif not on and self.tray is not None:
+            self.tray.stop()
+            self.tray = None
+            self._tray_host_changed(False)
+
+    def _tray_host_changed(self, active: bool):
+        if active and not self._held:
+            self.hold()
+            self._held = True
+        elif not active and self._held:
+            self._held = False
+            self.release()
+            if self.win is not None and not self.win.get_visible():
+                self.win.present()     # the tray is gone: don't leave a hidden window nobody can reach
+
+    def _show_if_no_tray(self):
+        if self.win is not None and not self.win.get_visible() and not self._held:
+            self.win.present()
+        return False
+
+    def _tray_action(self, name: str):
+        if name == "quit":
+            self.quit_app()
+        elif self.win is None:
+            self.activate()
+        else:
+            self.win.present()
+            if name == "updates":
+                self.win.show_updates()
+
+    def quit_app(self):
+        if self.win is not None:
+            self.win._save_window_state()
+        if self.tray is not None:
+            self.tray.stop()
+        self.quit()
 
 
 class PakchanWindow(Adw.ApplicationWindow):
@@ -4304,13 +4627,33 @@ class PakchanWindow(Adw.ApplicationWindow):
         _set_setting("win_maximized", maximized)
         return False           # let the window close
 
+    def _on_close_request(self, *_a):
+        self._save_window_state()
+        if getattr(self.get_application(), "_held", False) and _setting("background"):
+            self.set_visible(False)    # keep running in the tray
+            return True
+        return False
+
+    def _quit(self):
+        """Ctrl+Q: really quit, even when closing the window would only hide it in the tray."""
+        app = self.get_application()
+        if hasattr(app, "quit_app"):
+            app.quit_app()
+        else:
+            self.close()
+
+    def show_updates(self):
+        """From the tray: show the Updates page and check again."""
+        self._on_filter(None, "updates")
+        self._start_update_check()
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.set_title("Pakchan")
         self.set_default_size(_setting("win_width"), _setting("win_height"))
         if _setting("win_maximized"):
             self.maximize()
-        self.connect("close-request", self._save_window_state)
+        self.connect("close-request", self._on_close_request)
         # keep saved size 
         self._start_guard = not _setting("win_maximized")
         self.connect("notify::maximized", self._on_start_maximized)
@@ -4430,7 +4773,7 @@ class PakchanWindow(Adw.ApplicationWindow):
                 ("preferences",  self._on_preferences,        ["<Control>comma"]),
                 ("shortcuts",    self._on_shortcuts,          ["<Control>question", "F1"]),
                 ("refresh",      lambda *_: self._load_packages(), ["<Control>r", "F5"]),
-                ("close_window", lambda *_: self.close(),     ["<Control>q"])):
+                ("close_window", lambda *_: self._quit(),     ["<Control>q"])):
             act = Gio.SimpleAction.new(name, None)
             act.connect("activate", handler)
             self.add_action(act)
@@ -6037,6 +6380,27 @@ class PakchanWindow(Adw.ApplicationWindow):
         start.add(self._combo_pref("Start page", "start_page", self._START_PAGE_LABELS))
         start.add(self._combo_pref("Sort order", "start_sort", [(s, s) for s in SORT_OPTIONS]))
         look.add(start)
+        back = Adw.PreferencesGroup(title="Background")
+        tray_ok = _tray_host_available()
+        tray_row = Adw.SwitchRow(title="Minimize to tray",
+                                 subtitle="Closing the window minimizes Pakchan to the tray. Quit from the tray menu or with Ctrl+Q.")
+        tray_on = _setting("background") and tray_ok      # a saved "on" does not count while no tray is there
+        tray_row.set_active(tray_on)
+        tray_row.set_sensitive(tray_ok)
+        auto_row = Adw.SwitchRow(title="Start at login", subtitle="Starts minimized to the tray.")
+        auto_row.set_active(tray_on and _autostart_file().exists())
+        auto_row.set_sensitive(tray_on)               # like the tray switch: off and greyed out without a tray
+        tray_row.connect("notify::active", self._on_background_toggled, auto_row)
+        self._autostart_handler = auto_row.connect("notify::active", self._on_autostart_toggled)
+        back.add(tray_row)
+        if not tray_ok:
+            back.add(Adw.ActionRow(
+                title="No tray found",
+                subtitle="On GNOME, install the "
+                         "<a href=\"https://extensions.gnome.org/extension/615/appindicator-support/\">"
+                         "AppIndicator extension</a>."))
+        back.add(auto_row)
+        look.add(back)
 
         sources = new_page("sources", "Sources", "system-software-install-symbolic")
         group = Adw.PreferencesGroup(
@@ -6118,6 +6482,25 @@ class PakchanWindow(Adw.ApplicationWindow):
         elif key in ("max_versions", "max_lines") and self.selected_pkg is not None:
             self._render_detail()
 
+    def _on_background_toggled(self, row, _pspec, auto_row):
+        on = row.get_active()
+        _set_setting("background", on)
+        app = self.get_application()
+        if hasattr(app, "set_tray"):
+            app.set_tray(on)
+        auto_row.set_sensitive(on)
+        if not on and auto_row.get_active():
+            auto_row.set_active(False)          # also removes the start-at-login entry
+
+    def _on_autostart_toggled(self, row, _pspec):
+        want = row.get_active()
+        if _set_autostart(want):
+            return
+        self._show_toast("Could not change the start-at-login entry.")
+        row.handler_block(self._autostart_handler)
+        row.set_active(not want)
+        row.handler_unblock(self._autostart_handler)
+
     def _on_source_toggled(self, row, _pspec, key: str):
         _set_setting(key, row.get_active())
         for name, setting in _SOURCE_SETTINGS.items():
@@ -6158,7 +6541,7 @@ class PakchanWindow(Adw.ApplicationWindow):
         """Show About dialog."""
         dlg = Adw.AboutDialog()
         dlg.set_application_name("Pakchan")
-        dlg.set_version("2.0.0")
+        dlg.set_version("2.0.1")
         dlg.set_comments(
             "A PAMAC-like package manager for Manjaro/Arch Linux "
             "with real changelogs for Pacman, AUR, Flatpak, and Snap.")
