@@ -191,8 +191,8 @@ def _run_group(cmd: list, timeout: float = 30, env: Optional[dict] = None) -> tu
             pass
         try:
             p.communicate(timeout=2)
-        except Exception:
-            pass
+        except Exception as e:
+            _dbg(f"[run] cleanup after timeout failed: {e}")
         return "", "timeout", 1
     return out.strip(), err.strip(), p.returncode
 
@@ -806,8 +806,8 @@ def _read_local_db() -> dict:
         if reason_file.exists():
             try:
                 reason = reason_file.read_text().strip()
-            except Exception:
-                pass
+            except Exception as e:
+                _dbg(f"[pacman] could not read {reason_file}: {e}")
         pkgs[name] = {
             "version": " ".join(fields.get("version", ["?"])),
             "desc":    " ".join(fields.get("desc", [""])),
@@ -866,8 +866,8 @@ def _read_sync_db() -> tuple[set, dict, bool]:
                                 pkg_ver = parts[0]
                                 segments = pkg_ver.rsplit("-", 2)
                                 names.add(segments[0] if len(segments) >= 2 else pkg_ver)
-            except Exception:
-                pass
+            except Exception as e:
+                _dbg(f"[pacman] could not read a sync database: {e}")
         if names:
             return names, full, True
 
@@ -1357,8 +1357,8 @@ def _flatpak_installed_version(app_dir: Path, cli_version: str = "") -> str:
     try:
         for branch_dir in app_dir.iterdir():
             return branch_dir.name
-    except Exception:
-        pass
+    except OSError as e:
+        _dbg(f"[flatpak] could not read {app_dir}: {e}")
     return "installed"
 
 
@@ -2397,8 +2397,8 @@ def _cl_db_flush(force: bool = False):
                 json.dumps(_CL_DB, ensure_ascii=False, indent=2), encoding="utf-8")
             _cl_dirty    = False
             _cl_last_save = now
-        except Exception:
-            pass
+        except Exception as e:
+            _dbg(f"[cache] could not save the changelog cache: {e}")
 
 
 def _cl_cache_get(key: str) -> Optional[dict]:
@@ -4517,6 +4517,18 @@ class PkgItem(GObject.Object):
         self.pkg = pkg
 
 
+class _PkgRow(Gtk.Box):
+    """One row of the package list; keeps the widgets that _row_bind fills in."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.w = None            # SimpleNamespace with the child widgets
+        self.pkg = None          # package shown now, None while the row is recycled
+        self.item = None         # its Gtk.ListItem
+        self.binding = False     # True while _row_bind sets the widget states
+        self.badge_css = None
+
+
 def _apply_theme(theme: str) -> bool:
     """Follow the desktop (system) or force the light / dark colour scheme.
     Returns False when the desktop kept a different scheme than the one asked for."""
@@ -4677,6 +4689,7 @@ class PakchanWindow(Adw.ApplicationWindow):
         self._pkgbuild_cache:    dict[str, tuple] = {}
         self._pkgbuild_inflight: set[str]         = set()
         self._preview_busy = False
+        self._searched = ""          # the query the list currently shows
 
         self._build_ui()
         # Network state
@@ -4684,8 +4697,8 @@ class PakchanWindow(Adw.ApplicationWindow):
             _mon = Gio.NetworkMonitor.get_default()
             _set_network_available(_mon.get_network_available())
             _mon.connect("network-changed", self._on_network_changed)
-        except Exception:
-            pass
+        except Exception as e:
+            _dbg(f"[net] no network monitor: {e}")
         self._load_packages()
 
     # ── CSS ───────────────────────────────────────────────────────────────────
@@ -4693,26 +4706,26 @@ class PakchanWindow(Adw.ApplicationWindow):
     def _css(self):
         p = Gtk.CssProvider()
         css = b"""
-        .badge-pacman  {background:#E3F2FD;color:#1565C0;border-radius:4px;padding:1px 6px;font-size:11px;}
-        .badge-aur     {background:#F3E5F5;color:#6A1B9A;border-radius:4px;padding:1px 6px;font-size:11px;}
-        .badge-flatpak {background:#E8F5E9;color:#2E7D32;border-radius:4px;padding:1px 6px;font-size:11px;}
-        .badge-snap    {background:#FFF3E0;color:#E65100;border-radius:4px;padding:1px 6px;font-size:11px;}
+        .badge-pacman  {background:#E3F2FD;color:#1565C0;border-radius:4px;padding:1px 6px;font-size:0.85em;}
+        .badge-aur     {background:#F3E5F5;color:#6A1B9A;border-radius:4px;padding:1px 6px;font-size:0.85em;}
+        .badge-flatpak {background:#E8F5E9;color:#2E7D32;border-radius:4px;padding:1px 6px;font-size:0.85em;}
+        .badge-snap    {background:#FFF3E0;color:#E65100;border-radius:4px;padding:1px 6px;font-size:0.85em;}
         .pk-dark .badge-pacman  {background:#12304D;color:#90CAF9;}
         .pk-dark .badge-aur     {background:#34173F;color:#CE93D8;}
         .pk-dark .badge-flatpak {background:#16341A;color:#A5D6A7;}
         .pk-dark .badge-snap    {background:#47260A;color:#FFB74D;}
-        .not-installed-tag {font-size:10px;font-weight:600;border-radius:4px;padding:0 5px;
+        .not-installed-tag {font-size:0.8em;font-weight:600;border-radius:4px;padding:0 5px;
                             border:1px solid alpha(currentColor,0.55);}
         .has-update    {color:@success_color;font-weight:bold;}
-        .stale-warn    {color:@warning_color;font-style:italic;font-size:11px;}
-        .mono          {font-family:monospace;font-size:12px;}
-        .sidebar-hdr   {font-size:11px;font-weight:bold;
-                        color:alpha(@foreground_color,0.45);padding:10px 12px 3px;}
+        .stale-warn    {color:@warning_color;font-style:italic;font-size:0.85em;}
+        .mono          {font-family:monospace;font-size:0.95em;}
+        .sidebar-hdr   {font-size:0.85em;font-weight:bold;
+                        color:alpha(currentColor,0.45);padding:10px 12px 3px;}
         .active-filter {font-weight:bold;color:@accent_color;}
-        .dep-tag       {font-size:10px;color:alpha(@foreground_color,0.4);}
-        .update-panel  {background:alpha(@foreground_color,0.03);
-                        border-top:1px solid alpha(@foreground_color,0.12);}
-        .update-log    {font-family:monospace;font-size:11px;padding:6px 10px;}
+        .dep-tag       {font-size:0.8em;color:alpha(currentColor,0.4);}
+        .update-panel  {background:alpha(currentColor,0.03);
+                        border-top:1px solid alpha(currentColor,0.12);}
+        .update-log    {font-family:monospace;font-size:0.9em;padding:6px 10px;}
         .action-install{color:@success_color;}
         .action-update {color:@accent_color;}
         .action-remove {color:@error_color;}
@@ -4944,12 +4957,11 @@ class PakchanWindow(Adw.ApplicationWindow):
         tb.set_margin_start(10); tb.set_margin_end(10)
         tb.set_margin_top(8);    tb.set_margin_bottom(8)
 
-        self.search = Gtk.Entry()
+        self.search = Gtk.SearchEntry()
         self.search.set_placeholder_text("Search…")
         self.search.set_hexpand(True)
         self.search.connect("activate", lambda _: self._do_search())
-        self.search.connect("changed", self._on_search_changed)
-        self.search.connect("icon-press", self._on_search_icon_press)
+        self.search.connect("search-changed", self._on_search_changed)
         tb.append(self.search)
 
         sb = Gtk.Button(icon_name="system-search-symbolic")
@@ -5103,7 +5115,7 @@ class PakchanWindow(Adw.ApplicationWindow):
 
     def _row_setup(self, _factory, list_item):
         """Build the widgets of one row, once. _row_bind fills them in."""
-        hb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        hb = _PkgRow(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         hb.set_margin_start(8); hb.set_margin_end(8)
         hb.set_margin_top(5);   hb.set_margin_bottom(5)
 
@@ -5146,7 +5158,6 @@ class PakchanWindow(Adw.ApplicationWindow):
                                badge=badge, badge_box=badge_box, badge_icon=badge_icon,
                                dep=dep, not_inst=not_inst, ver=ver, arrow=arrow,
                                new_ver=new_ver, size=size)
-        hb.pkg = None; hb.item = None; hb.binding = False; hb.badge_css = None
         list_item.set_child(hb)
 
     def _row_bind(self, _factory, list_item):
@@ -5250,6 +5261,7 @@ class PakchanWindow(Adw.ApplicationWindow):
         _add_item("Force-refresh changelog", lambda: self._context_force_refresh(pkg))
 
         popover.set_child(box)
+        popover.connect("closed", lambda p: GLib.idle_add(p.unparent))
         popover.popup()
 
     def _copy_text_to_clipboard(self, text: str):
@@ -5668,21 +5680,13 @@ class PakchanWindow(Adw.ApplicationWindow):
         self._populate_list()
 
     def _on_search_changed(self, entry):
-        # Only show the clear icon once there's something to clear.
-        has_text = bool(entry.get_text())
-        entry.set_icon_from_icon_name(
-            Gtk.EntryIconPosition.SECONDARY,
-            "edit-clear-symbolic" if has_text else None)
-        if has_text:
-            entry.set_icon_tooltip_text(Gtk.EntryIconPosition.SECONDARY, "Clear")
-
-    def _on_search_icon_press(self, entry, icon_pos):
-        if icon_pos == Gtk.EntryIconPosition.SECONDARY:
-            entry.set_text("")
+        """Typing waits for Enter; emptying the field (clear icon, Esc) restores the category view."""
+        if not entry.get_text().strip() and self._searched:
             self._do_search()
 
     def _do_search(self):
         q = self.search.get_text().strip()
+        self._searched = q
         if q:
             # Search crosses all sources — reset sidebar highlight but not the filter
             for key, btn in self._filter_btns.items():
@@ -6151,8 +6155,8 @@ class PakchanWindow(Adw.ApplicationWindow):
                                 found_files = True
                                 break
                         if found_files: break
-                except Exception:
-                    pass
+                except Exception as e:
+                    _dbg(f"[files] could not list the files: {e}")
                 if found_files: break
             if not found_files:
                 note = Gtk.Label(label=f"/var/lib/flatpak/app/{pkg.name}/")
@@ -6541,7 +6545,7 @@ class PakchanWindow(Adw.ApplicationWindow):
         """Show About dialog."""
         dlg = Adw.AboutDialog()
         dlg.set_application_name("Pakchan")
-        dlg.set_version("2.0.1")
+        dlg.set_version("2.1.0")
         dlg.set_comments(
             "A PAMAC-like package manager for Manjaro/Arch Linux "
             "with real changelogs for Pacman, AUR, Flatpak, and Snap.")
@@ -6569,9 +6573,6 @@ class PakchanWindow(Adw.ApplicationWindow):
             f"Python: {sys.version.split()[0]}\n"
         )
         dlg.present(self)
-
-    def _on_github_token(self, action, param):
-        self._on_preferences(action, param, "github")
 
     def _github_token_group(self) -> Adw.PreferencesGroup:
         """Save, replace or remove the token used for GitHub lookups."""
@@ -7092,6 +7093,7 @@ class PakchanWindow(Adw.ApplicationWindow):
 
     def _show_toast(self, title: str, timeout: int = 8, button_label: str = None, button_cb=None):
         toast = Adw.Toast(title=title, timeout=timeout)
+        toast.set_use_markup(False)
         if button_label and button_cb:
             toast.set_button_label(button_label)
             toast.connect("button-clicked", button_cb)
