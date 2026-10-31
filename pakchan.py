@@ -111,7 +111,7 @@ app.run(None)
 sys.exit(1 if app.cancelled else 0)
 '''
 
-import gzip, html, json, os, re, shlex, shutil, sys, tarfile, tempfile, threading, time, warnings
+import gzip, html, json, os, platform, re, shlex, shutil, sys, tarfile, tempfile, threading, time, warnings
 
 # Strip ANSI codes from raw pty output for the no-Vte fallback view
 _ANSI_ESCAPE_RE = re.compile(
@@ -1204,9 +1204,12 @@ _fp_search_cache: dict[str, tuple[float, list]] = {}
 
 
 def _flatpak_search(q: str) -> list[dict]:
-    """Search all configured Flatpak remotes via `flatpak search`."""
+    """Search the Flatpak remotes: in the local catalogs, else via `flatpak search`."""
     if not cmd_exists("flatpak"):
         return []
+    entries = _flatpak_index()
+    if entries is not None:
+        return _flatpak_index_search(entries, q)
     hit = _fp_search_cache.get(q)
     if hit and time.monotonic() - hit[0] < _FP_CACHE_TTL:
         return hit[1]
@@ -1236,11 +1239,175 @@ def _flatpak_search(q: str) -> list[dict]:
 
 
 def _flatpak_search_cached(q: str) -> Optional[list]:
-    """The remembered result of a Flatpak search, or None if there is none (or it is too old)."""
+    """Flatpak search result if it is fast, else None."""
+    if _FP_INDEX is not None:                 # catalogs already in memory
+        return _flatpak_index_search(_FP_INDEX, q)
     hit = _fp_search_cache.get(q)
     if hit and time.monotonic() - hit[0] < _FP_CACHE_TTL:
         return hit[1]
     return None
+
+
+# Flatpak search from AppStream catalogs 
+_FP_INDEX: Optional[list] = None            # the apps of all catalogs, once loaded
+_FP_INDEX_LOCK = threading.Lock()
+_fp_index_failed: Optional[list] = None     # catalogs that could not be read (not tried again)
+_FP_INDEX_VERSION = 1
+_XML_LANG = "{http://www.w3.org/XML/1998/namespace}lang"
+
+
+def _flatpak_catalog_bases() -> list:
+    data = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
+    return [Path("/var/lib/flatpak/appstream"), data / "flatpak" / "appstream"]
+
+
+def _flatpak_catalog_files() -> list:
+    """(remote, file) for every remote with a downloaded catalog for this architecture."""
+    arch = platform.machine()
+    found = []
+    for base in _flatpak_catalog_bases():
+        try:
+            remotes = sorted(p for p in base.iterdir() if p.is_dir())
+        except OSError:
+            continue
+        for rdir in remotes:
+            for name in ("appstream.xml.gz", "appstream.xml"):
+                f = rdir / arch / "active" / name
+                if f.is_file():
+                    found.append((rdir.name, f))
+                    break
+    return found
+
+
+def _flatpak_catalog_signature(files: list) -> list:
+    sig = []
+    for remote, f in files:
+        st = f.stat()
+        sig.append([remote, str(f.resolve()), st.st_size, st.st_mtime_ns])
+    return sig
+
+
+def _catalog_entry(elem, remote: str) -> Optional[dict]:
+    """One component of a catalog as a search entry (None for runtimes, add-ons and so on)."""
+    if elem.get("type") not in ("desktop-application", "desktop"):
+        return None
+    bundle = next((b for b in elem.findall("bundle") if b.get("type") == "flatpak" and b.text), None)
+    if bundle is None:
+        return None
+    parts = bundle.text.strip().split("/")
+    if len(parts) < 4 or parts[0] != "app":
+        return None
+    app_id = parts[1]
+
+    def plain(tag: str) -> str:               # the text without a language attribute
+        for e in elem.findall(tag):
+            if not e.get(_XML_LANG):
+                return " ".join((e.text or "").split())
+        return ""
+
+    release = elem.find("releases/release")
+    return {
+        "app_id": app_id, "name": plain("name") or app_id, "desc": plain("summary"),
+        "version": (release.get("version") if release is not None else "") or "?",
+        "remote": remote,
+        "kw": " ".join((k.text or "").strip() for k in elem.findall("keywords/keyword")
+                       if k.text and not k.get(_XML_LANG)),
+    }
+
+
+def _parse_flatpak_catalog(path: Path, remote: str) -> list:
+    opener = gzip.open if path.suffix == ".gz" else open
+    entries = []
+    with opener(path, "rb") as fh:
+        for _event, elem in ET.iterparse(fh, events=("end",)):
+            if elem.tag != "component":
+                continue
+            entry = _catalog_entry(elem, remote)
+            if entry:
+                entries.append(entry)
+            elem.clear()                       # the catalogs are large: don't keep the tree
+    return entries
+
+
+def _flatpak_index_file() -> Path:
+    return CACHE_DIR / "flatpak_index.json"
+
+
+def _flatpak_index_load_cache(sig: list) -> Optional[list]:
+    try:
+        data = json.loads(_flatpak_index_file().read_text(encoding="utf-8"))
+        if (data.get("version") == _FP_INDEX_VERSION and data.get("sig") == sig
+                and isinstance(data.get("entries"), list)):
+            return data["entries"]
+    except (OSError, ValueError, AttributeError):
+        pass
+    return None
+
+
+def _flatpak_index_save_cache(sig: list, entries: list):
+    path = _flatpak_index_file()
+    tmp = path.with_name(path.name + f".tmp-{os.getpid()}")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps({"version": _FP_INDEX_VERSION, "sig": sig, "entries": entries},
+                                  ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as e:
+        print(f"[flatpak] could not save the catalog index: {e}", file=sys.stderr)
+
+
+def _flatpak_index() -> Optional[list]:
+    """Apps of the downloaded Flatpak catalogs, or None when there is no usable catalog,then `flatpak search` is used instead."""
+    global _FP_INDEX, _fp_index_failed
+    if _FP_INDEX is not None:
+        return _FP_INDEX
+    with _FP_INDEX_LOCK:
+        if _FP_INDEX is not None:
+            return _FP_INDEX
+        files = _flatpak_catalog_files()
+        if not files:
+            return None
+        sig = None
+        try:
+            sig = _flatpak_catalog_signature(files)
+            if sig == _fp_index_failed:
+                return None
+            entries = _flatpak_index_load_cache(sig)
+            if entries is None:
+                t0 = time.perf_counter()
+                entries, seen = [], set()
+                for remote, f in files:
+                    for entry in _parse_flatpak_catalog(f, remote):
+                        if entry["app_id"] not in seen:
+                            seen.add(entry["app_id"])
+                            entries.append(entry)
+                _flatpak_index_save_cache(sig, entries)
+                print(f"[flatpak] read {len(entries)} apps from the catalogs in "
+                      f"{time.perf_counter() - t0:.1f} s", file=sys.stderr)
+        except Exception as e:     # noqa: BLE001  (damaged file, short read, bad XML ...)
+            print(f"[flatpak] could not read the catalogs, using `flatpak search`: {e}", file=sys.stderr)
+            _fp_index_failed = sig
+            return None
+        for e in entries:
+            e["hay"] = " ".join((e["name"], e["app_id"], e["desc"], e.get("kw", ""))).lower()
+        _FP_INDEX = entries
+        return entries
+
+
+def _flatpak_index_search(entries: list, q: str) -> list:
+    tokens = q.lower().split()
+    if not tokens:
+        return []
+    return [e for e in entries if all(t in e["hay"] for t in tokens)]
+
+
+def _flatpak_index_preload_bg(reload: bool = False):
+    """Read the catalogs in the background"""
+    global _FP_INDEX
+    if reload:
+        _FP_INDEX = None
+    if _setting("source_flatpak") and cmd_exists("flatpak"):
+        threading.Thread(target=_flatpak_index, daemon=True).start()
 
 
 _PKGBUILD_FILE_CAP = 200_000   # bytes read from any one file of an AUR package
@@ -5617,6 +5784,7 @@ class PakchanWindow(Adw.ApplicationWindow):
         self.status_page.set_description("Reading local package databases")
         self.all_packages = []
         self.selected_pkg = None
+        _flatpak_index_preload_bg(reload=True)     # catalogs may have changed since the last load
         threading.Thread(target=self._fetch_all, daemon=True).start()
 
     def _fetch_all(self):
