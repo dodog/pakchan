@@ -2007,6 +2007,7 @@ class _TrayIcon:
     def _vanished(self, _conn, _name):
         self._host = False
         if self.registered:
+            print("[tray] the tray host disappeared", file=sys.stderr)
             self.registered = False
             self._on_host(False)
 
@@ -4726,6 +4727,7 @@ class PakchanApp(Adw.Application):
         self.win: Optional["PakchanWindow"] = None
         self.tray: Optional[_TrayIcon] = None
         self._held = False             # kept alive by the tray while the window is hidden
+        self._tray_grace = 0           # timer: how long a vanished tray may stay away
         self._hidden_start = False
         self.add_main_option("background", 0, GLib.OptionFlags.NONE, GLib.OptionArg.NONE,
                              "Start hidden in the tray (needs the tray setting)", None)
@@ -4760,17 +4762,39 @@ class PakchanApp(Adw.Application):
         elif not on and self.tray is not None:
             self.tray.stop()
             self.tray = None
-            self._tray_host_changed(False)
+            self._drop_tray()
 
     def _tray_host_changed(self, active: bool):
-        if active and not self._held:
-            self.hold()
-            self._held = True
-        elif not active and self._held:
+        if active:
+            self._cancel_tray_grace()
+            if not self._held:
+                self.hold()
+                self._held = True
+        elif self._held and not self._tray_grace:
+            # The tray can vanish for a moment (screen lock, shell restart): wait before
+            # showing the window, so a hidden window does not pop up each time.
+            self._tray_grace = GLib.timeout_add_seconds(20, self._tray_gone)
+
+    def _cancel_tray_grace(self):
+        if self._tray_grace:
+            GLib.source_remove(self._tray_grace)
+            self._tray_grace = 0
+
+    def _tray_gone(self):
+        self._tray_grace = 0
+        if self._held and not (self.tray is not None and self.tray.registered):
+            print("[tray] the tray did not come back, showing the window", file=sys.stderr)
+            self._drop_tray()
+            if self.win is not None and not self.win.get_visible():
+                self.win.present()     # don't leave a hidden window nobody can reach
+        return False
+
+    def _drop_tray(self):
+        """Stop being kept alive by the tray."""
+        self._cancel_tray_grace()
+        if self._held:
             self._held = False
             self.release()
-            if self.win is not None and not self.win.get_visible():
-                self.win.present()     # the tray is gone: don't leave a hidden window nobody can reach
 
     def _show_if_no_tray(self):
         if self.win is not None and not self.win.get_visible() and not self._held:
@@ -4816,7 +4840,10 @@ class PakchanWindow(Adw.ApplicationWindow):
 
     def _on_close_request(self, *_a):
         self._save_window_state()
-        if getattr(self.get_application(), "_held", False) and _setting("background"):
+        app = self.get_application()
+        tray = getattr(app, "tray", None)
+        if (getattr(app, "_held", False) and _setting("background")
+                and getattr(tray, "registered", True)):      # no tray to go to right now: just close
             self.set_visible(False)    # keep running in the tray
             return True
         return False
