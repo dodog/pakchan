@@ -111,7 +111,7 @@ app.run(None)
 sys.exit(1 if app.cancelled else 0)
 '''
 
-import gzip, html, json, os, platform, re, shlex, shutil, sys, tarfile, tempfile, threading, time, warnings
+import gzip, html, json, os, platform, re, shlex, shutil, sys, tarfile, tempfile, threading, time
 
 # Strip ANSI codes from raw pty output for the no-Vte fallback view
 _ANSI_ESCAPE_RE = re.compile(
@@ -1948,6 +1948,17 @@ _DBUSMENU_XML = """<node><interface name="com.canonical.dbusmenu">
 </interface></node>"""
 
 
+def _register_dbus_object(conn, path: str, info, on_call, on_get_property) -> int:
+    """Export an object on the bus."""
+    new = getattr(conn, "register_object_with_closures2", None)
+    if new is not None:
+        try:
+            return new(path, info, on_call, on_get_property, None)
+        except TypeError as e:        # a PyGObject that cannot wrap the callables
+            _dbg(f"[tray] register_object_with_closures2 failed ({e}), using register_object")
+    return conn.register_object(path, info, on_call, on_get_property, None)
+
+
 class _TrayIcon:
     """Tray icon over the StatusNotifierItem protocol, with a small dbusmenu menu."""
     ITEM_PATH, MENU_PATH = "/StatusNotifierItem", "/MenuBar"
@@ -1976,12 +1987,9 @@ class _TrayIcon:
             self._conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
             item = Gio.DBusNodeInfo.new_for_xml(_SNI_XML).interfaces[0]
             menu = Gio.DBusNodeInfo.new_for_xml(_DBUSMENU_XML).interfaces[0]
-            self._ids = []
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", DeprecationWarning)
-                self._ids = [
-                    self._conn.register_object(self.ITEM_PATH, item, self._item_call, self._item_get, None),
-                    self._conn.register_object(self.MENU_PATH, menu, self._menu_call, self._menu_get, None)]
+            self._ids = [
+                _register_dbus_object(self._conn, self.ITEM_PATH, item, self._item_call, self._item_get),
+                _register_dbus_object(self._conn, self.MENU_PATH, menu, self._menu_call, self._menu_get)]
             self._owner = Gio.bus_own_name_on_connection(
                 self._conn, self._name, Gio.BusNameOwnerFlags.NONE, self._name_acquired, None)
             self._watch = Gio.bus_watch_name_on_connection(
