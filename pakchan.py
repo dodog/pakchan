@@ -155,7 +155,15 @@ class Package:
 
     @property
     def has_update(self) -> bool:
-        return bool(self.new_version and self.new_version != self.version)
+        if not self.new_version:
+            return False
+        # rebuilt Flatpak without a new version number
+        return self.new_version != self.version or self.repo == "flatpak"
+
+    @property
+    def update_label(self) -> str:
+        """show after the arrow: a rebuilt Flatpak keeps its version number."""
+        return "new build" if self.new_version == self.version else self.new_version
 
     @property
     def cl_key(self) -> str:
@@ -5402,7 +5410,7 @@ class PakchanWindow(Adw.ApplicationWindow):
                 w.ver.set_label(pkg.version)
                 w.arrow.set_visible(bool(pkg.has_update))
                 w.new_ver.set_visible(bool(pkg.has_update))
-                w.new_ver.set_label(pkg.new_version if pkg.has_update else "")
+                w.new_ver.set_label(pkg.update_label if pkg.has_update else "")
             else:
                 w.ver.set_label(f"Available: {pkg.new_version}")
                 w.arrow.set_visible(False)
@@ -6108,7 +6116,7 @@ class PakchanWindow(Adw.ApplicationWindow):
             self._info_row(label, pkg.name)
         if pkg.installed:
             self._info_row("Installed", pkg.version)
-            if pkg.has_update:     self._info_row("Update to",  pkg.new_version)
+            if pkg.has_update:     self._info_row("Update to",  pkg.update_label)
             if pkg.installed_size: self._info_row("On disk",    pkg.installed_size)
         else:
             self._info_row("Available", pkg.new_version)
