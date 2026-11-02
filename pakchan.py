@@ -1493,6 +1493,29 @@ def _bullet_list(items: list, limit: int = 12) -> str:
     return text
 
 
+# pacman: ":: removing A breaks dependency 'A' required by B"
+_BREAKS_RE = re.compile(r"^::\s*(?:(\S+):\s*)?removing\s+\S+\s+breaks dependency\s+['\u2018\u2019](.+?)['\u2018\u2019]"
+                        r"(?:\s+required by\s+(\S+))?\s*$")
+
+
+def _removal_problems(text: str) -> list:
+    """Who needs what, why a removal is refused."""
+    problems = []
+    for ln in text.splitlines():
+        line = ln.strip()
+        m = _BREAKS_RE.match(line)
+        if m:
+            who, dep = m.group(3) or m.group(1), m.group(2)
+            problems.append(f"{who} needs {dep}" if who else f"something installed needs {dep}")
+            continue
+        m = re.match(r"^::\s*(\S+): requires (.+)$", line)
+        if m:
+            problems.append(f"{m.group(1)} needs {m.group(2)}")
+        elif line.startswith("::") and "proceed" not in line.lower():
+            problems.append(line[2:].strip())
+    return list(dict.fromkeys(problems))
+
+
 def _pacman_removal_preview(names: list) -> tuple:
     env = dict(os.environ, LC_ALL="C")
     out, err, rc = _run_group(
@@ -1502,11 +1525,7 @@ def _pacman_removal_preview(names: list) -> tuple:
                  if ln.strip() and ln.strip() not in names]
         return sorted(dict.fromkeys(extra)), None
     if "could not satisfy dependencies" in err.lower():
-        problem = []
-        for ln in err.splitlines():
-            m = re.match(r"^::\s*(\S+): requires (.+)$", ln.strip())
-            if m:
-                problem.append(f"{m.group(1)} needs {m.group(2)}")
+        problem = _removal_problems(err + "\n" + out)
         return None, problem or ["other installed packages still need them"]
     print(f"[remove-preview] could not run (exit {rc}): {err[-200:]}", file=sys.stderr)
     return None, None
@@ -6800,7 +6819,7 @@ class PakchanWindow(Adw.ApplicationWindow):
         """Show About dialog."""
         dlg = Adw.AboutDialog()
         dlg.set_application_name("Pakchan")
-        dlg.set_version("2.1.0")
+        dlg.set_version("2.1.1")
         dlg.set_comments(
             "A PAMAC-like package manager for Manjaro/Arch Linux "
             "with real changelogs for Pacman, AUR, Flatpak, and Snap.")
