@@ -52,11 +52,13 @@ yay -S pakchan
 paru -S pakchan
 ```
 
-This pulls in all required dependencies (`python-gobject`, `gtk4`, `libadwaita`, `pacman-contrib`) automatically and installs the app launcher and icon, so it'll show up in your app grid right away. Once installed, just launch **Pakchan** from your app menu, or run:
+This pulls in all required dependencies (`python`, `python-gobject`, `gtk4`, `libadwaita` 1.5 or newer, `pacman-contrib`) automatically and installs the app launcher and icon, so it'll show up in your app grid right away. Once installed, just launch **Pakchan** from your app menu, or run:
 
 ```bash
 pakchan
 ```
+
+Optional extras (listed as optional dependencies of the package): `yay` or `paru` (AUR updates), `flatpak`, `snapd`, `polkit` (graphical password prompt, otherwise `sudo` is used), `git` (PKGBUILD tab and changelogs from git tags), `github-cli` (use your GitHub login for GitHub's request limit) and `vte4` (embedded terminal for update output).
 
 ### Option 2: From source
 
@@ -65,7 +67,7 @@ If you'd rather run it straight from a clone of this repo:
 ```bash
 git clone https://github.com/dodog/pakchan.git
 cd pakchan
-sudo pacman -S python-gobject gtk4 libadwaita pacman-contrib
+sudo pacman -S python python-gobject gtk4 libadwaita pacman-contrib
 
 #### Optional: AUR support
 # yay on Manjaro
@@ -100,19 +102,35 @@ python3 pakchan.py
 
 **Changelog shows "not available"?**
 
-- Some smaller AUR packages have minimal git history
+- Some small or niche packages publish no release notes anywhere; Pakchan then shows a link to the project instead
 - Flatpak apps not on Flathub won't have AppStream data
 - Network access is required to fetch changelog data
 
+**"Request limit reached" for api.github.com?**
+
+Pakchan reads GitHub release notes from each project's public release feed, which has no hourly limit, so you normally don't need to do anything. Only when a feed can't be read does it fall back to GitHub's API, which allows just 60 anonymous requests per hour. If you ever run into that, you can raise it to 5000 with a free GitHub token. It needs no permissions, because Pakchan only reads public release notes:
+
+1. In Pakchan, open **Preferences** (menu → Preferences, or Ctrl+,) and go to the **GitHub** tab.
+2. Click **Create a token on GitHub**, log in, leave all the boxes unticked and click **Generate token**.
+3. Copy the token (it starts with `ghp_`), paste it into the field and click **Save**.
+
+Pakchan checks the token with GitHub before saving it. It is kept in `~/.config/pakchan/github_token` (readable only by you) and is only ever sent to `api.github.com`. **Preferences → GitHub → Remove token** deletes it.
 **No embedded terminal / falls back to a plain-text log?**
 
 - Install `vte4` — Pakchan works fine without it, but a real pty gives `sudo`/`makepkg` prompts more natural behavior
 
+**"No tray found" next to Minimize to tray?**
+
+- KDE and XFCE show Pakchan's tray icon out of the box.
+- On GNOME, install and enable the [AppIndicator and KStatusNotifierItem Support](https://extensions.gnome.org/extension/615/appindicator-support/) extension.
+
 **App won't launch?**
 
 ```bash
-sudo pacman -S python-gobject gtk4 libadwaita
+sudo pacman -S python python-gobject gtk4 libadwaita
 ```
+
+Pakchan needs libadwaita 1.5 or newer.
 
 ---
 
@@ -130,6 +148,7 @@ Pakchan stores changelog source mappings in `data/mappings.json`, which is fetch
 | --------------- | ---------- | ---------------------------------------------------------- |
 | `github`         | —          | Direct GitHub repo (`owner/repo`) — uses the Releases/Tags APIs |
 | `gitlab`         | —          | Direct GitLab repo (`host`/`repo`) — uses the Releases/Tags APIs |
+| `forgejo`        | —          | Direct Forgejo/Gitea/Codeberg repo (`host`/`repo`) — uses the Releases/Tags APIs |
 | `release_pages`  | —          | Any URL scraped with the generic, best-effort release-notes parser |
 | `custom`         | `text_file`| Plain text (or Markdown) changelog file                   |
 
