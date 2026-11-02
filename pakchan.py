@@ -1922,6 +1922,7 @@ _SNI_XML = """<node><interface name="org.kde.StatusNotifierItem">
   <method name="Activate"><arg type="i" direction="in"/><arg type="i" direction="in"/></method>
   <method name="SecondaryActivate"><arg type="i" direction="in"/><arg type="i" direction="in"/></method>
   <method name="Scroll"><arg type="i" direction="in"/><arg type="s" direction="in"/></method>
+  <method name="ProvideXdgActivationToken"><arg type="s" direction="in"/></method>
   <signal name="NewTitle"/><signal name="NewIcon"/><signal name="NewAttentionIcon"/>
   <signal name="NewOverlayIcon"/><signal name="NewToolTip"/>
   <signal name="NewStatus"><arg type="s"/></signal>
@@ -1978,6 +1979,24 @@ def _register_dbus_object(conn, path: str, info, on_call, on_get_property) -> in
     return conn.register_object(path, info, on_call, on_get_property, None)
 
 
+def _activate_with_token(app, token: str, on_fail):
+    """Take focus on tray open"""
+    conn, path = app.get_dbus_connection(), app.get_dbus_object_path()
+    if not (token and conn and path):
+        on_fail()
+        return
+    platform = {"activation-token": GLib.Variant("s", token), "desktop-startup-id": GLib.Variant("s", token)}
+
+    def done(c, result):
+        try:
+            c.call_finish(result)
+        except GLib.Error as e:
+            _dbg(f"[tray] activation with a token failed: {e}")
+            on_fail()
+    conn.call(app.get_application_id(), path, "org.freedesktop.Application", "Activate",
+              GLib.Variant("(a{sv})", (platform,)), None, Gio.DBusCallFlags.NONE, 5000, None, done)
+
+
 class _TrayIcon:
     """Tray icon over the StatusNotifierItem protocol, with a small dbusmenu menu."""
     ITEM_PATH, MENU_PATH = "/StatusNotifierItem", "/MenuBar"
@@ -1998,7 +2017,14 @@ class _TrayIcon:
         self._on_action, self._on_host = on_action, on_host
         self._conn, self._ids, self._owner, self._watch = None, [], 0, 0
         self._acquired = self._host = self.registered = False
+        self._token = ("", 0.0)         # (xdg-activation token, when it arrived)
         self._name = f"org.kde.StatusNotifierItem-{os.getpid()}-1"
+
+    def take_token(self) -> str:
+        """The focus permission the tray host handed over before the click"""
+        token, arrived = self._token
+        self._token = ("", 0.0)
+        return token if token and time.monotonic() - arrived < 10 else ""
 
     # -- life cycle --
     def start(self) -> bool:
@@ -2068,8 +2094,10 @@ class _TrayIcon:
         kind, value = self._ITEM_PROPS[prop]
         return GLib.Variant(kind, value)
 
-    def _item_call(self, _conn, _sender, _path, _iface, method, _params, invocation):
-        if method in ("Activate", "SecondaryActivate"):
+    def _item_call(self, _conn, _sender, _path, _iface, method, params, invocation):
+        if method == "ProvideXdgActivationToken":
+            self._token = (params.unpack()[0], time.monotonic())
+        elif method in ("Activate", "SecondaryActivate"):
             self._on_action("open")
         invocation.return_value(None)       # ContextMenu and Scroll: the host shows the menu itself
 
@@ -4763,6 +4791,7 @@ class PakchanApp(Adw.Application):
         self.tray: Optional[_TrayIcon] = None
         self._held = False             # kept alive by the tray while the window is hidden
         self._tray_grace = 0           # timer: how long a vanished tray may stay away
+        self._after_activate = ""      # next activation should also do ("updates")
         self._hidden_start = False
         self.add_main_option("background", 0, GLib.OptionFlags.NONE, GLib.OptionArg.NONE,
                              "Start hidden in the tray (needs the tray setting)", None)
@@ -4776,6 +4805,9 @@ class PakchanApp(Adw.Application):
     def on_activate(self, app):
         if self.win is not None:       # second launch or tray click: show the same window
             self.win.present()
+            action, self._after_activate = self._after_activate, ""
+            if action == "updates":
+                self.win.show_updates()
             return
         _apply_theme(_setting("theme"))
         self.win = PakchanWindow(application=app)
@@ -4842,9 +4874,10 @@ class PakchanApp(Adw.Application):
         elif self.win is None:
             self.activate()
         else:
-            self.win.present()
-            if name == "updates":
-                self.win.show_updates()
+            # Real activation with focus token to raise window
+            self._after_activate = name
+            token = self.tray.take_token() if self.tray is not None else ""
+            _activate_with_token(self, token, self.activate)
 
     def quit_app(self):
         if self.win is not None:
