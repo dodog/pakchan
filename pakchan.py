@@ -6867,7 +6867,7 @@ class PakchanWindow(Adw.ApplicationWindow):
         """Show About dialog."""
         dlg = Adw.AboutDialog()
         dlg.set_application_name("Pakchan")
-        dlg.set_version("2.1.1")
+        dlg.set_version("2.1.3")
         dlg.set_comments(
             "A PAMAC-like package manager for Manjaro/Arch Linux "
             "with real changelogs for Pacman, AUR, Flatpak, and Snap.")
