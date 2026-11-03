@@ -1513,6 +1513,22 @@ def _removal_problems(text: str) -> list:
     return list(dict.fromkeys(problems))
 
 
+def _pacman_apply_command(root_cmd: str, sel: list, all_packages: list) -> Optional[str]:
+    """The pacman command for the selected packages"""
+    chosen = [p for p in sel if p.repo == "pacman" and not p.marked_remove]
+    if not chosen:
+        return None
+
+    def is_update(p) -> bool:
+        return p.installed and p.has_update
+    pending = {p.name for p in all_packages if p.repo == "pacman" and is_update(p)}
+    updating = {p.name for p in chosen if is_update(p)}
+    if updating and updating >= pending:
+        extra = [shlex.quote(p.name) for p in chosen if p.name not in updating]    # new installs
+        return f"{root_cmd} pacman -Syu --noconfirm {' '.join(extra)}".rstrip()
+    return f"{root_cmd} pacman -S --noconfirm {' '.join(shlex.quote(p.name) for p in chosen)}"
+
+
 def _pacman_removal_preview(names: list) -> tuple:
     env = dict(os.environ, LC_ALL="C")
     out, err, rc = _run_group(
@@ -7259,7 +7275,7 @@ class PakchanWindow(Adw.ApplicationWindow):
         # Conflict-resolving removals run first
         if rm_pac_aur_early:
             cmds.append(f"{single_root_cmd} pacman -Rns --noconfirm {' '.join(rm_pac_aur_early)}")
-        if pac: cmds.append(f"{single_root_cmd} pacman -S --noconfirm {' '.join(pac)}")
+        if pac: cmds.append(_pacman_apply_command(single_root_cmd, sel, self.all_packages))
         if aur:
             h = "yay" if cmd_exists("yay") else "paru"
             cmds.append(f"{h} -S --noconfirm {' '.join(aur)}")
