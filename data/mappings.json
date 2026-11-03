@@ -6,6 +6,10 @@
       "parser": "text_file",
       "url": "https://eidas.minv.sk/downloadservice/eidklient/linux/eID_klient_release_notes.txt"
     },
+    "tzdata": {
+      "parser": "text_file",
+      "url": "https://data.iana.org/time-zones/tzdb/NEWS"
+    },    
     "electrum": {
       "parser": "text_file",
       "url": "https://raw.githubusercontent.com/spesmilo/electrum/refs/heads/master/RELEASE-NOTES"
@@ -47,7 +51,11 @@
     "mkvtoolnix-gui": {
       "host": "codeberg.org",
       "repo": "mbunkus/mkvtoolnix"
-    },      
+    },     
+    "guile": {
+      "host": "codeberg.org",
+      "repo": "guile/guile"
+    },        
     "mhwd": {
       "host": "code.manjaro.org",
       "repo": "applications/mhwd"
@@ -87,6 +95,7 @@
     "go": "golang/go",
     "gramps": "gramps-project/gramps",
     "gsmartcontrol": "ashaduri/gsmartcontrol",
+    "gulp": "gulpjs/gulp",    
     "handbrake": "HandBrake/HandBrake",
     "helix": "helix-editor/helix",
     "htop": "htop-dev/htop",
@@ -99,13 +108,18 @@
     "mpv": "mpv-player/mpv",
     "neofetch": "dylanaraps/neofetch",
     "neovim": "neovim/neovim",
+    "nmap": "nmap/nmap",
+    "zenmap": "nmap/nmap",    
+    "npm": "npm/cli",    
     "nodejs": "nodejs/node",
     "obs-studio": "obsproject/obs-studio",
     "onionshare": "onionshare/onionshare",
     "openvpn": "OpenVPN/openvpn",
+    "openssl": "openssl/openssl",    
     "pcmanfm": "lxde/pcmanfm",
     "pinta": "PintaProject/Pinta",
     "podman": "containers/podman",
+    "ppp": "ppp-project/ppp",    
     "poedit": "vslavik/poedit",
     "qbittorrent": "qbittorrent/qBittorrent",
     "rapid-photo-downloader": "damonlynch/rapid-photo-downloader",
@@ -124,6 +138,7 @@
     "vim": "vim/vim",
     "vscodium": "VSCodium/vscodium",
     "webcamoid": "webcamoid/webcamoid",
+    "yarn": "yarnpkg/yarn",    
     "zulucrypt": "mhogomchungu/zuluCrypt",
     "zulumount": "mhogomchungu/zuluCrypt"
   },
@@ -172,6 +187,10 @@
       "host": "gitlab.gnome.org",
       "repo": "GNOME/console"
     },
+    "gupnp": {
+      "host": "gitlab.gnome.org",
+      "repo": "GNOME/gupnp"
+    },    
     "bazaar": {
       "host": "gitlab.gnome.org",
       "repo": "World/bazaar"
