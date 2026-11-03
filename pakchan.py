@@ -2849,6 +2849,8 @@ def _scrape_text_file(body: str) -> Optional[dict]:
 
     ver_header = re.compile(
         r'^(?!\s)'                              # headers start in column 0
+        r'(?:(?:(?:major|notable|noteworthy|important)\s+)?(?:changes|news|updates)\s+(?:in|for)\s+'
+        r'|overview\s+of\s+(?:[\w-]+\s+){0,2}changes\s+in\s+|what\W?s\s+new\s+in\s+|new\s+in\s+)?'   # "Major changes in 1.2.0"
         r'(?:[A-Za-z][\wÀ-ž_-]*\s+){0,2}'       # optional short app name prefix
         r'(?:version|release|ver(?:zia)?|v\.?)?\s*'  # EN/SK version keyword
         r'[v=\[\-#*_\s]*'
@@ -6865,7 +6867,7 @@ class PakchanWindow(Adw.ApplicationWindow):
         """Show About dialog."""
         dlg = Adw.AboutDialog()
         dlg.set_application_name("Pakchan")
-        dlg.set_version("2.1.2")
+        dlg.set_version("2.1.1")
         dlg.set_comments(
             "A PAMAC-like package manager for Manjaro/Arch Linux "
             "with real changelogs for Pacman, AUR, Flatpak, and Snap.")
