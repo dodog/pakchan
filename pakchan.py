@@ -21,14 +21,11 @@ from types import SimpleNamespace
 
 # Vte gives us a real embedded terminal
 Vte = None
-for _vte_ver in ("3.91", "2.91"):
-    try:
-        gi.require_version("Vte", _vte_ver)
-        from gi.repository import Vte as _Vte
-        Vte = _Vte
-        break
-    except Exception:
-        continue
+try:
+    gi.require_version("Vte", "3.91")
+    from gi.repository import Vte
+except (ImportError, ValueError):
+    Vte = None
 _HAVE_VTE = Vte is not None
 
 # Minimal self-contained SUDO_ASKPASS fallback
