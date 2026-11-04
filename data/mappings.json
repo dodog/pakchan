@@ -32,6 +32,10 @@
       "host": "code.manjaro.org",
       "repo": "profiles/manjaro-gnome-settings"
     },
+     "manjaro-hello": {
+      "host": "code.manjaro.org",
+      "repo": "applications/manjaro-hello"
+    },    
     "manjaro-kde-settings": {
       "host": "code.manjaro.org",
       "repo": "profiles/manjaro-kde-settings"
