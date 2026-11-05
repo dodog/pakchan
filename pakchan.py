@@ -108,7 +108,7 @@ app.run(None)
 sys.exit(1 if app.cancelled else 0)
 '''
 
-import gzip, html, json, os, platform, re, shlex, shutil, sys, tarfile, tempfile, threading, time
+import difflib, gzip, html, json, os, platform, re, shlex, shutil, sys, tarfile, tempfile, threading, time
 
 # Strip ANSI codes from raw pty output for the no-Vte fallback view
 _ANSI_ESCAPE_RE = re.compile(
@@ -1483,6 +1483,178 @@ def _fetch_aur_pkgbuild(name: str) -> tuple:
     return None, err
 
 
+# ─── PKGBUILD changes since the installed version (AUR updates) ──────────────
+
+def _pkgbuild_version(text: str) -> str:
+    """[epoch:]pkgver-pkgrel as a PKGBUILD states it ('' if it can't be read plainly)."""
+    def field(name: str) -> str:
+        m = re.search(rf"(?m)^[ \t]*{name}=['\"]?([^'\"\s#;]+)", text)
+        return m.group(1) if m else ""
+    ver, rel, epoch = field("pkgver"), field("pkgrel"), field("epoch")
+    if not ver or not rel:
+        return ""
+    return f"{epoch}:{ver}-{rel}" if epoch and epoch != "0" else f"{ver}-{rel}"
+
+
+def _pick_old_commit(commits: list, installed: str, build_date: int) -> tuple:
+    """Which commit was the PKGBUILD you built the installed version from?
+    commits: (hash, commit time, PKGBUILD text), newest first. Returns (hash or None, how)."""
+    older = [c for c in commits if c[1] <= build_date + 3600] if build_date else []
+    for h, _when, text in (older or commits):
+        if installed and _pkgbuild_version(text) == installed:
+            return h, "same version"
+    if older:               # e.g. -git packages: the version is computed while building
+        return older[0][0], "last change before it was built"
+    return None, ""
+
+
+def _local_build_date(name: str) -> int:
+    """When an installed package was built, from pacman's local database (0 = unknown)."""
+    try:
+        for d in PACMAN_LOCAL.iterdir():
+            if not d.name.startswith(name + "-"):
+                continue
+            try:
+                desc = (d / "desc").read_text(errors="replace")
+            except OSError:
+                continue
+            who, when = re.search(r"%NAME%\n(.+)", desc), re.search(r"%BUILDDATE%\n(\d+)", desc)
+            if who and when and who.group(1).strip() == name:
+                return int(when.group(1))
+    except OSError:
+        pass
+    return 0
+
+
+def _unified(old: str, new: str, name: str) -> str:
+    return "\n".join(difflib.unified_diff(
+        old.splitlines(), new.splitlines(), f"{name} (installed)", f"{name} (new)", n=3, lineterm=""))
+
+
+def _aur_clone_history(base: str, dest: str) -> str:
+    """Clone an AUR repository with its history, without checking files out. '' or the error."""
+    out, err, rc = run_git(["git", "clone", "-q", "--no-checkout", _aur_clone_url(base), dest], timeout=40)
+    return "" if rc == 0 else f"git clone of {base} failed: {(err or out or 'no output')[-200:]}"
+
+
+def _git_show(repo: str, spec: str) -> Optional[str]:
+    out, _err, rc = run_git(["git", "-C", repo, "show", spec], timeout=15)
+    return out[:_PKGBUILD_FILE_CAP] if rc == 0 else None
+
+
+def _git_tree_files(repo: str, rev: str) -> list:
+    out, _err, rc = run_git(["git", "-C", repo, "ls-tree", "-r", "--name-only", rev], timeout=10)
+    return out.splitlines() if rc == 0 else []
+
+
+def _aur_pkgbuild_review(name: str, installed: str, build_date: int) -> dict:
+    """What changed in an AUR package's PKGBUILD and install scripts since the installed version.
+    files: {name, kind: diff|added|removed|full, text}; other: changed files that are not shown."""
+    res = {"name": name, "installed": installed, "new_version": "", "how": "", "note": "",
+           "error": "", "files": [], "other": [], "unchanged": False}
+    if not cmd_exists("git"):
+        res["error"] = "git is not installed"
+        return res
+    if not _is_safe_ident(name):
+        res["error"] = "unsafe package name"
+        return res
+    with tempfile.TemporaryDirectory(prefix="pakchan-aur-") as tmp:
+        repo = str(Path(tmp) / "repo")
+        err = _aur_clone_history(name, repo)
+        if err:
+            base = _aur_package_base(name)
+            if base and base != name and _is_safe_ident(base):
+                shutil.rmtree(repo, ignore_errors=True)
+                err = _aur_clone_history(base, repo)
+        if err:
+            res["error"] = err
+            return res
+        new_pkgbuild = _git_show(repo, "HEAD:PKGBUILD")
+        if new_pkgbuild is None:
+            res["error"] = "the AUR repository has no PKGBUILD"
+            return res
+        res["new_version"] = _pkgbuild_version(new_pkgbuild)
+
+        out, _err, _rc = run_git(
+            ["git", "-C", repo, "log", "-n", "100", "--format=%H %ct", "--", "PKGBUILD"], timeout=15)
+        commits = []
+        for line in out.splitlines():
+            h, _, when = line.partition(" ")
+            if re.fullmatch(r"[0-9a-f]{40}", h) and when.isdigit():
+                text = _git_show(repo, f"{h}:PKGBUILD")
+                if text is not None:
+                    commits.append((h, int(when), text))
+        old, res["how"] = _pick_old_commit(commits, installed, build_date)
+
+        head_files = _git_tree_files(repo, "HEAD")
+        shown = ["PKGBUILD"] + sorted(f for f in head_files if f.endswith(".install") and "/" not in f)
+        if old is None:
+            res["note"] = ("Could not find the version you have installed in the AUR history, "
+                           "so the current files are shown in full.")
+            for fname in shown:
+                text = _git_show(repo, f"HEAD:{fname}")
+                if text is not None:
+                    res["files"].append({"name": fname, "kind": "full", "text": text})
+            return res
+
+        old_files = set(_git_tree_files(repo, old))
+        names = sorted({"PKGBUILD"} | {f for f in old_files | set(head_files)
+                                       if f.endswith(".install") and "/" not in f})
+        for fname in names:
+            before = _git_show(repo, f"{old}:{fname}") if fname in old_files else ""
+            after = _git_show(repo, f"HEAD:{fname}") if fname in head_files else ""
+            if before == after:
+                continue
+            kind = "added" if fname not in old_files else "removed" if fname not in head_files else "diff"
+            res["files"].append({"name": fname, "kind": kind, "text": _unified(before or "", after or "", fname)})
+        changed, _e, _r = run_git(["git", "-C", repo, "diff", "--name-only", old, "HEAD"], timeout=15)
+        res["other"] = [f for f in changed.splitlines() if f and f not in names and f != ".SRCINFO"]
+        res["unchanged"] = not res["files"] and not res["other"]
+    return res
+
+
+def _review_lines(reviews: list) -> list:
+    """The text of the review window as (line, kind) pairs; the kind decides the colour."""
+    lines = []
+    for r in reviews:
+        if lines:
+            lines.append(("", "plain"))
+        arrow = f"{r['installed']} \u2192 {r['new_version']}" if r.get("new_version") else r.get("installed", "")
+        lines.append((f"{r['name']}   {arrow}", "heading"))
+        if r.get("error"):
+            lines.append((f"Could not check the PKGBUILD: {r['error']}", "error"))
+            continue
+        if r.get("note"):
+            lines.append((r["note"], "note"))
+        elif r.get("how") == "last change before it was built":
+            lines.append(("Compared with the last PKGBUILD from before the installed version was built.", "note"))
+        if r.get("unchanged"):
+            lines.append(("No changes to the PKGBUILD or the install scripts.", "note"))
+        for f in r.get("files", []):
+            title = {"added": "added", "removed": "removed", "full": "shown in full"}.get(f["kind"], "changed")
+            extra = " (runs as root when the package is installed, updated or removed)" \
+                if f["name"].endswith(".install") else ""
+            lines.append((f"\u2500\u2500 {f['name']}: {title}{extra}", "file"))
+            for pos, ln in enumerate(f["text"].splitlines()):
+                if f["kind"] == "full":
+                    kind = "plain"
+                elif pos < 2:               # the two header lines of a unified diff
+                    kind = "meta"
+                elif ln.startswith("@@"):
+                    kind = "hunk"
+                elif ln.startswith("+"):
+                    kind = "added"
+                elif ln.startswith("-"):
+                    kind = "removed"
+                else:
+                    kind = "plain"
+                lines.append((ln, kind))
+        if r.get("other"):
+            lines.append(("Other files that changed (not shown): " + ", ".join(r["other"][:12])
+                          + (" \u2026" if len(r["other"]) > 12 else ""), "note"))
+    return lines
+
+
 def _bullet_list(items: list, limit: int = 12) -> str:
     text = "\n".join(f"• {n}" for n in items[:limit])
     if len(items) > limit:
@@ -1804,6 +1976,7 @@ SETTING_DEFAULTS = {
     "max_versions": 0, "max_lines": 0,      # 0 = each source's own default
     "source_aur": True, "source_flatpak": True, "source_snap": True,
     "background": False,                    # keep running in the tray when the window is closed
+    "pkgbuild_diff": True,                   # show what changed in the PKGBUILD before updating AUR packages
 }
 _settings_data: Optional[dict] = None
 
@@ -4974,6 +5147,7 @@ class PakchanWindow(Adw.ApplicationWindow):
         self._pkgbuild_cache:    dict[str, tuple] = {}
         self._pkgbuild_inflight: set[str]         = set()
         self._preview_busy = False
+        self._review_busy = False    # a PKGBUILD review is being fetched
         self._searched = ""          # the query the list currently shows
         self._fp_searching: set[str] = set()       # Flatpak searches running in the background
         self._fp_done: dict[str, float] = {}       # when a Flatpak search last finished, per query
@@ -6738,6 +6912,16 @@ class PakchanWindow(Adw.ApplicationWindow):
             group.add(row)
         sources.add(group)
 
+        review = Adw.PreferencesGroup(title="AUR safety")
+        review_row = Adw.SwitchRow(
+            title="Review PKGBUILD changes before updating",
+            subtitle="Shows what changed in the PKGBUILD and install scripts since the version you have "
+                     "installed, and asks before the update goes on.")
+        review_row.set_active(_setting("pkgbuild_diff"))
+        review_row.connect("notify::active", lambda r, _p: _set_setting("pkgbuild_diff", r.get_active()))
+        review.add(review_row)
+        sources.add(review)
+
         helps = Adw.PreferencesGroup(
             title="Help other users",
             description=("Add a changelog source to the community database if Pakchan doesn't currently display it. "
@@ -7186,7 +7370,106 @@ class PakchanWindow(Adw.ApplicationWindow):
 
     def _on_apply_dialog_response(self, dlg, response, sel: list):
         if response == "apply":
+            self._review_then_apply(sel)
+
+    def _review_then_apply(self, sel: list):
+        """AUR updates: first look at what changed in their PKGBUILDs"""
+        aur = [p for p in sel if p.repo == "aur" and p.installed and p.has_update and not p.marked_remove]
+        if not aur or not _setting("pkgbuild_diff"):
             self._do_apply(sel)
+            return
+        if self._review_busy:
+            return
+        self._review_busy = True
+        self.apply_btn.set_sensitive(False)
+        self.footer.set_text("Checking PKGBUILD changes…")
+        threading.Thread(target=self._bg_pkgbuild_review, args=(sel, aur), daemon=True).start()
+
+    def _bg_pkgbuild_review(self, sel: list, pkgs: list):
+        def one(p) -> dict:
+            try:
+                return _aur_pkgbuild_review(p.name, p.version, _local_build_date(p.name))
+            except Exception as e:      # noqa: BLE001  (show the problem instead of losing the review)
+                return {"name": p.name, "installed": p.version, "error": str(e)}
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            reviews = list(ex.map(one, pkgs))
+        GLib.idle_add(self._pkgbuild_review_done, sel, reviews)
+
+    def _pkgbuild_review_done(self, sel: list, reviews: list):
+        self._review_busy = False
+        self.apply_btn.set_sensitive(True)
+        self._update_footer()
+        if all(r.get("unchanged") for r in reviews):
+            self._show_toast("No PKGBUILD changes since the installed versions.")
+            self._do_apply(sel)
+        else:
+            self._show_pkgbuild_review(sel, reviews)
+
+    def _show_pkgbuild_review(self, sel: list, reviews: list) -> Adw.Window:
+        """Read-only diff of the PKGBUILDs; Continue starts the update, Cancel leaves it."""
+        win = Adw.Window(transient_for=self, modal=True, title="Review PKGBUILD changes")
+        win.set_default_size(920, 660)
+        buf = Gtk.TextBuffer()
+
+        def tint(r, g, b, a=0.22):
+            c = Gdk.RGBA()
+            c.red, c.green, c.blue, c.alpha = r, g, b, a
+            return c
+        buf.create_tag("heading", weight=Pango.Weight.BOLD, scale=1.2, pixels_above_lines=10)
+        buf.create_tag("file", weight=Pango.Weight.BOLD, pixels_above_lines=8)
+        buf.create_tag("note", style=Pango.Style.ITALIC)
+        buf.create_tag("error", foreground_rgba=tint(0.88, 0.11, 0.14, 1.0))
+        buf.create_tag("meta", foreground_rgba=tint(0.54, 0.54, 0.54, 1.0))
+        buf.create_tag("hunk", foreground_rgba=tint(0.21, 0.52, 0.89, 1.0))
+        for kind, rgb in (("added", (0.18, 0.76, 0.49)), ("removed", (0.88, 0.11, 0.14))):
+            try:                    # tint the whole line where GTK can, else only the text
+                buf.create_tag(kind, paragraph_background_rgba=tint(*rgb))
+            except TypeError:
+                buf.create_tag(kind, background_rgba=tint(*rgb))
+        for line, kind in _review_lines(reviews):
+            if kind == "plain":
+                buf.insert(buf.get_end_iter(), line + "\n")
+            else:
+                buf.insert_with_tags_by_name(buf.get_end_iter(), line + "\n", kind)
+
+        view = Gtk.TextView.new_with_buffer(buf)
+        view.set_editable(False)
+        view.set_cursor_visible(False)
+        view.set_monospace(True)
+        view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        for side in ("left", "right", "top", "bottom"):
+            getattr(view, f"set_{side}_margin")(12)
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_child(view)
+        scroller.set_vexpand(True)
+
+        cancel = Gtk.Button(label="Cancel")
+        go = Gtk.Button(label="Continue update")
+        go.add_css_class("suggested-action")
+        cancel.connect("clicked", lambda _b: win.close())
+        go.connect("clicked", lambda _b: (win.close(), self._do_apply(sel)))
+        bar = Gtk.Box(spacing=8)
+        bar.set_halign(Gtk.Align.END)
+        for m in ("top", "bottom", "start", "end"):
+            getattr(bar, f"set_margin_{m}")(10)
+        bar.append(cancel)
+        bar.append(go)
+
+        header = Adw.HeaderBar()
+        header.set_title_widget(Adw.WindowTitle(
+            title="Review PKGBUILD changes",
+            subtitle=f"{len(reviews)} AUR package{'s' if len(reviews) != 1 else ''} to update"))
+        content = Adw.ToolbarView()
+        content.add_top_bar(header)
+        content.set_content(scroller)
+        content.add_bottom_bar(bar)
+        win.set_content(content)
+
+        keys = Gtk.EventControllerKey()
+        keys.connect("key-pressed", lambda _c, keyval, *_a: win.close() or True if keyval == Gdk.KEY_Escape else False)
+        win.add_controller(keys)
+        win.present()
+        return win
 
     def _make_askpass_script(self) -> Optional[str]:
         """graphical password prompt"""
